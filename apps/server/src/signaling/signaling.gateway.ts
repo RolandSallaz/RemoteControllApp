@@ -29,6 +29,7 @@ import { TurnService } from "../turn/turn.service.js";
 type ClientSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SignalingServer = Server<ClientToServerEvents, ServerToClientEvents>;
 const viewerApprovalTimeoutMs = 30_000;
+const viewerApprovalCacheTtlMs = readPositiveIntegerEnv("REMOTE_CONTROL_VIEWER_APPROVAL_CACHE_TTL_MS", 120_000);
 
 @WebSocketGateway({
   cors: {
@@ -44,6 +45,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   private stalePeerCleanupTimer?: ReturnType<typeof setInterval>;
   private readonly clientAddressById = new Map<string, string>();
   private readonly connectionCountsByAddress = new Map<string, number>();
+  private readonly recentApprovedViewers = new Map<string, number>();
   private readonly maxConnectionsPerAddress = readPositiveIntegerEnv("REMOTE_CONTROL_MAX_CONNECTIONS_PER_ADDRESS", 16);
   private readonly joinAttemptLimiter = new SlidingWindowRateLimiter(
     readPositiveIntegerEnv("REMOTE_CONTROL_JOIN_ATTEMPTS_PER_WINDOW", 30),
@@ -70,6 +72,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   onModuleInit(): void {
     this.stalePeerCleanupTimer = setInterval(() => {
       this.cleanupExpiredPeers();
+      this.cleanupExpiredApprovals();
     }, 30_000);
     this.stalePeerCleanupTimer.unref?.();
   }
@@ -150,18 +153,25 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       this.passwordAttemptLimiter.reset(passwordAttemptKey);
 
       if (settings.requireViewerApproval ?? true) {
-        const approvalKey = `${clientAddress}:${joinPayload.sessionId}`;
-        if (!this.approvalRequestLimiter.consume(approvalKey)) {
-          const message = "Too many approval requests, try again later";
-          client.emit("error", { message });
-          return { error: message };
-        }
+        const approvalKey = this.approvalCacheKey(clientAddress, joinPayload.sessionId);
+        if (this.isRecentlyApproved(approvalKey)) {
+          // Reconnects/rejoins from the same viewer address should not reprompt the host immediately.
+        } else {
+          const approvalRateLimitKey = `${clientAddress}:${joinPayload.sessionId}`;
+          if (!this.approvalRequestLimiter.consume(approvalRateLimitKey)) {
+            const message = "Too many approval requests, try again later";
+            client.emit("error", { message });
+            return { error: message };
+          }
 
-        const approved = await this.requestViewerApproval(client, joinPayload);
-        if (!approved) {
-          const message = "Connection rejected by host";
-          client.emit("error", { message });
-          return { error: message };
+          const approved = await this.requestViewerApproval(client, joinPayload);
+          if (!approved) {
+            const message = "Connection rejected by host";
+            client.emit("error", { message });
+            return { error: message };
+          }
+
+          this.markApproved(approvalKey);
         }
       }
     }
@@ -355,6 +365,37 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       });
     }
   }
+
+  private cleanupExpiredApprovals(): void {
+    const now = Date.now();
+    for (const [key, expiresAt] of this.recentApprovedViewers.entries()) {
+      if (expiresAt <= now) {
+        this.recentApprovedViewers.delete(key);
+      }
+    }
+  }
+
+  private approvalCacheKey(clientAddress: string, sessionId: string): string {
+    return `${clientAddress}:${sessionId}`;
+  }
+
+  private isRecentlyApproved(key: string): boolean {
+    const expiresAt = this.recentApprovedViewers.get(key);
+    if (!expiresAt) {
+      return false;
+    }
+
+    if (expiresAt <= Date.now()) {
+      this.recentApprovedViewers.delete(key);
+      return false;
+    }
+
+    return true;
+  }
+
+  private markApproved(key: string): void {
+    this.recentApprovedViewers.set(key, Date.now() + viewerApprovalCacheTtlMs);
+  }
 }
 
 function sanitizeShutdownReason(reason?: string): string {
@@ -411,7 +452,7 @@ function sanitizeWebRtcDescriptionPayload(payload: unknown): WebRtcDescriptionPa
   const sessionId = sanitizeSessionId(payload.sessionId);
   const targetClientId = sanitizeOptionalString(payload.targetClientId, 128);
   const descriptionType = payload.description.type;
-  const sdp = sanitizeOptionalString(payload.description.sdp, 1_000_000);
+  const sdp = sanitizeSdp(payload.description.sdp, 1_000_000);
   if (!sessionId || !isRtcDescriptionType(descriptionType)) {
     return undefined;
   }
@@ -474,6 +515,15 @@ function sanitizeOptionalString(value: unknown, maxLength: number): string | und
 
   const normalized = value.trim();
   return normalized.length <= maxLength ? normalized : undefined;
+}
+
+function sanitizeSdp(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string" || value.length > maxLength) {
+    return undefined;
+  }
+
+  // Preserve SDP exactly as generated by WebRTC. Trimming can alter line structure.
+  return value;
 }
 
 function sanitizeNullableString(value: unknown, maxLength: number): string | null | undefined {

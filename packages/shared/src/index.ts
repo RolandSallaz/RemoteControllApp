@@ -234,6 +234,13 @@ export type FileTransferChunkMessage = {
 export type FileTransferCompleteMessage = {
   kind: "file-transfer-complete";
   transferId: string;
+  checksum: string;
+};
+
+export type FileTransferAbortMessage = {
+  kind: "file-transfer-abort";
+  transferId: string;
+  reason?: string;
 };
 
 export type DataChannelMessage =
@@ -243,7 +250,8 @@ export type DataChannelMessage =
   | ClipboardSyncMessage
   | FileTransferStartMessage
   | FileTransferChunkMessage
-  | FileTransferCompleteMessage;
+  | FileTransferCompleteMessage
+  | FileTransferAbortMessage;
 
 export type ServerToClientEvents = {
   "session:approval-request": (

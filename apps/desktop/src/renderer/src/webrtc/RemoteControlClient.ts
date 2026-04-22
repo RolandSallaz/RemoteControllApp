@@ -3,6 +3,7 @@ import type {
   ClipboardSyncMessage,
   ControlMessage,
   DataChannelMessage,
+  FileTransferAbortMessage,
   FileTransferChunkMessage,
   FileTransferCompleteMessage,
   FileTransferStartMessage,
@@ -70,6 +71,7 @@ export type RemoteControlDiagnostic = {
 };
 
 type IncomingFileTransfer = {
+  checksum: number;
   failed: boolean;
   name: string;
   size: number;
@@ -78,6 +80,7 @@ type IncomingFileTransfer = {
   path?: string;
   queue: Promise<void>;
   receivedBytes: number;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
 };
 
 type ClipboardData = {
@@ -96,8 +99,11 @@ const maxFileNameLength = 260;
 const maxHostSources = 16;
 const maxIncomingTransfers = 4;
 const maxDataChannelMessageLength = 13 * 1024 * 1024;
+const fileTransferReasonMaxLength = 256;
+const incomingFileTransferTimeoutMs = 30_000;
 const imageDataUrlPrefixPattern = /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,/i;
 const mimeTypePattern = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
+const checksumPattern = /^[a-f0-9]{8}$/i;
 
 export type RemoteControlClientOptions = {
   role: PeerRole;
@@ -124,6 +130,7 @@ export class RemoteControlClient {
   private socket?: ClientSocket;
   private peerConnection?: RTCPeerConnection;
   private localStream?: MediaStream;
+  private remoteStream?: MediaStream;
   private controlChannel?: RTCDataChannel;
   private videoTransceiver?: RTCRtpTransceiver;
   private audioTransceiver?: RTCRtpTransceiver;
@@ -148,6 +155,7 @@ export class RemoteControlClient {
   private clipboardSnapshot = "";
   private remoteClipboardSnapshot?: string;
   private lastSessionPassword?: string;
+  private readonly outgoingTransferAbortReasons = new Map<string, string>();
   private previousStatsSample?: {
     timestamp: number;
     videoBytes: number;
@@ -208,6 +216,7 @@ export class RemoteControlClient {
     this.audioTransceiver = undefined;
     this.socket = undefined;
     this.localStream = undefined;
+    this.remoteStream = undefined;
     this.peerClientId = undefined;
     this.lastSessionPassword = undefined;
     this.pendingCandidates.length = 0;
@@ -295,6 +304,7 @@ export class RemoteControlClient {
     const channel = this.getOpenControlChannel();
 
     const transferId = createTransferId();
+    this.outgoingTransferAbortReasons.delete(transferId);
     const startMessage: FileTransferStartMessage = {
       kind: "file-transfer-start",
       transferId,
@@ -309,12 +319,15 @@ export class RemoteControlClient {
       const chunkSize = 48 * 1024;
       let offset = 0;
       let index = 0;
+      let checksum = createFileTransferChecksum();
 
       while (offset < file.size) {
         this.ensureFileTransferChannelOpen(channel);
+        this.throwIfOutgoingTransferAborted(transferId);
 
         const chunk = file.slice(offset, offset + chunkSize);
         const bytes = new Uint8Array(await chunk.arrayBuffer());
+        checksum = updateFileTransferChecksum(checksum, bytes);
         const chunkMessage: FileTransferChunkMessage = {
           kind: "file-transfer-chunk",
           transferId,
@@ -327,18 +340,24 @@ export class RemoteControlClient {
         index += 1;
         onProgress?.(Math.min(100, Math.round((offset / file.size) * 100)));
         await waitForChannelDrain(channel);
+        this.throwIfOutgoingTransferAborted(transferId);
       }
 
       const completeMessage: FileTransferCompleteMessage = {
         kind: "file-transfer-complete",
-        transferId
+        transferId,
+        checksum: formatFileTransferChecksum(checksum)
       };
 
       this.sendFileTransferMessage(channel, completeMessage);
       await waitForChannelDrain(channel);
+      this.throwIfOutgoingTransferAborted(transferId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      this.sendFileTransferAbort(channel, transferId, reason);
       throw new Error(`Failed to send ${file.name}: ${reason}`);
+    } finally {
+      this.outgoingTransferAbortReasons.delete(transferId);
     }
   }
 
@@ -426,6 +445,7 @@ export class RemoteControlClient {
         this.peerClientId = undefined;
         this.resetPeerConnection();
         this.options.onPeer(undefined);
+        this.remoteStream = undefined;
         this.options.onRemoteStream(undefined);
         this.options.onStats?.(undefined);
         this.reportStatus("SESSION_PEER_LEFT", "Peer left the session", {
@@ -439,6 +459,7 @@ export class RemoteControlClient {
         this.peerClientId = undefined;
         this.resetPeerConnection();
         this.options.onPeer(undefined);
+        this.remoteStream = undefined;
         this.options.onRemoteStream(undefined);
         this.options.onStats?.(undefined);
         this.reportStatus("SESSION_SHUTDOWN", payload.reason, {
@@ -605,7 +626,28 @@ export class RemoteControlClient {
     };
 
     peerConnection.ontrack = (event) => {
-      this.options.onRemoteStream(event.streams[0]);
+      const stream = event.streams[0] ?? this.ensureRemoteStream();
+      if (event.streams[0]) {
+        this.remoteStream = event.streams[0];
+      } else if (!stream.getTracks().some((track) => track.id === event.track.id)) {
+        stream.addTrack(event.track);
+      }
+
+      this.options.onRemoteStream(stream);
+      event.track.onended = () => {
+        if (!this.remoteStream) {
+          return;
+        }
+
+        const nextTracks = this.remoteStream.getTracks().filter((track) => track.readyState !== "ended");
+        if (nextTracks.length === 0) {
+          this.remoteStream = undefined;
+          this.options.onRemoteStream(undefined);
+          return;
+        }
+
+        this.options.onRemoteStream(this.remoteStream);
+      };
     };
 
     peerConnection.onconnectionstatechange = () => {
@@ -688,6 +730,11 @@ export class RemoteControlClient {
 
       if (parsed.kind === "file-transfer-complete") {
         void this.completeIncomingFileTransfer(parsed);
+        return;
+      }
+
+      if (parsed.kind === "file-transfer-abort") {
+        this.handleFileTransferAbort(parsed);
         return;
       }
 
@@ -776,10 +823,12 @@ export class RemoteControlClient {
     this.peerConnection?.close();
     this.controlChannel = undefined;
     this.peerConnection = undefined;
+    this.remoteStream = undefined;
     this.videoTransceiver = undefined;
     this.audioTransceiver = undefined;
     this.pendingCandidates.length = 0;
     this.previousStatsSample = undefined;
+    this.options.onRemoteStream(undefined);
   }
 
   private startSessionHeartbeat(): void {
@@ -1035,6 +1084,7 @@ export class RemoteControlClient {
     }
 
     const transfer: IncomingFileTransfer = {
+      checksum: createFileTransferChecksum(),
       failed: false,
       name: message.name,
       size: safeSize,
@@ -1054,6 +1104,7 @@ export class RemoteControlClient {
       });
     transfer.queue.catch((error) => this.failIncomingFileTransfer(message.transferId, getErrorMessage(error)));
     this.incomingTransfers.set(message.transferId, transfer);
+    this.refreshIncomingTransferTimeout(message.transferId, transfer);
     this.reportStatus("FILE_TRANSFER_RECEIVING", `Receiving file: ${message.name}`, {
       name: message.name,
       size: safeSize,
@@ -1088,7 +1139,9 @@ export class RemoteControlClient {
         }
 
         transfer.receivedBytes += chunk.byteLength;
+        transfer.checksum = updateFileTransferChecksum(transfer.checksum, chunk);
         transfer.nextChunkIndex += 1;
+        this.refreshIncomingTransferTimeout(message.transferId, transfer);
       });
     transfer.queue.catch((error) => this.failIncomingFileTransfer(message.transferId, getErrorMessage(error)));
   }
@@ -1105,9 +1158,19 @@ export class RemoteControlClient {
     }
 
     this.incomingTransfers.delete(message.transferId);
+    this.clearIncomingTransferTimeout(transfer);
     if (transfer.receivedBytes !== transfer.size) {
       await window.remoteControl.abortIncomingFileTransfer(message.transferId);
       this.reportStatus("FILE_TRANSFER_INCOMPLETE", `File transfer incomplete: ${transfer.name}`, {
+        name: transfer.name,
+        transferId: message.transferId
+      });
+      return;
+    }
+
+    if (message.checksum !== formatFileTransferChecksum(transfer.checksum)) {
+      await window.remoteControl.abortIncomingFileTransfer(message.transferId);
+      this.reportStatus("FILE_TRANSFER_FAILED", `File transfer checksum mismatch: ${transfer.name}`, {
         name: transfer.name,
         transferId: message.transferId
       });
@@ -1142,7 +1205,9 @@ export class RemoteControlClient {
 
     transfer.failed = true;
     this.incomingTransfers.delete(transferId);
+    this.clearIncomingTransferTimeout(transfer);
     void window.remoteControl.abortIncomingFileTransfer(transferId);
+    this.sendFileTransferAbort(this.controlChannel, transferId, reason);
     this.reportStatus("FILE_TRANSFER_FAILED", `File transfer failed: ${transfer.name}: ${reason}`, {
       name: transfer.name,
       transferId,
@@ -1151,15 +1216,69 @@ export class RemoteControlClient {
   }
 
   private failIncomingFileTransfers(reason: string): void {
-    const interruptedCount = this.incomingTransfers.size;
+    const transfers = [...this.incomingTransfers.entries()];
+    const interruptedCount = transfers.length;
     if (interruptedCount === 0) {
       return;
     }
 
     this.incomingTransfers.clear();
+    for (const [transferId, transfer] of transfers) {
+      this.clearIncomingTransferTimeout(transfer);
+      this.sendFileTransferAbort(this.controlChannel, transferId, reason);
+    }
     this.reportStatus("FILE_TRANSFER_INTERRUPTED", `${reason}: ${interruptedCount} file${interruptedCount === 1 ? "" : "s"}`, {
       interruptedCount
     });
+  }
+
+  private handleFileTransferAbort(message: FileTransferAbortMessage): void {
+    if (this.incomingTransfers.has(message.transferId)) {
+      this.failIncomingFileTransfer(message.transferId, message.reason ?? "Transfer aborted by sender");
+      return;
+    }
+
+    this.outgoingTransferAbortReasons.set(message.transferId, message.reason ?? "Transfer aborted by receiver");
+    this.reportStatus("FILE_TRANSFER_FAILED", `Outgoing file transfer aborted: ${message.reason ?? "Transfer aborted by receiver"}`, {
+      transferId: message.transferId
+    });
+  }
+
+  private refreshIncomingTransferTimeout(transferId: string, transfer: IncomingFileTransfer): void {
+    this.clearIncomingTransferTimeout(transfer);
+    transfer.timeoutTimer = setTimeout(() => {
+      transfer.timeoutTimer = undefined;
+      this.failIncomingFileTransfer(transferId, "Timed out waiting for the next file chunk");
+    }, incomingFileTransferTimeoutMs);
+  }
+
+  private clearIncomingTransferTimeout(transfer: IncomingFileTransfer): void {
+    if (transfer.timeoutTimer) {
+      clearTimeout(transfer.timeoutTimer);
+      transfer.timeoutTimer = undefined;
+    }
+  }
+
+  private throwIfOutgoingTransferAborted(transferId: string): void {
+    const reason = this.outgoingTransferAbortReasons.get(transferId);
+    if (reason) {
+      this.outgoingTransferAbortReasons.delete(transferId);
+      throw new Error(reason);
+    }
+  }
+
+  private sendFileTransferAbort(channel: RTCDataChannel | undefined, transferId: string, reason: string): void {
+    if (!channel || channel.readyState !== "open") {
+      return;
+    }
+
+    const message: FileTransferAbortMessage = {
+      kind: "file-transfer-abort",
+      transferId,
+      ...(sanitizeString(reason, fileTransferReasonMaxLength, false) ? { reason: sanitizeString(reason, fileTransferReasonMaxLength, false) } : {})
+    };
+
+    channel.send(JSON.stringify(message));
   }
 
   private reportStatus(
@@ -1459,6 +1578,14 @@ export class RemoteControlClient {
       }
     }
   }
+
+  private ensureRemoteStream(): MediaStream {
+    if (!this.remoteStream) {
+      this.remoteStream = new MediaStream();
+    }
+
+    return this.remoteStream;
+  }
 }
 
 function serializeDescription(description: RTCSessionDescriptionInit): RtcSessionDescription {
@@ -1528,6 +1655,10 @@ export function sanitizeDataChannelMessage(value: unknown): DataChannelMessage |
 
   if (value.kind === "file-transfer-complete") {
     return sanitizeFileTransferCompleteMessage(value);
+  }
+
+  if (value.kind === "file-transfer-abort") {
+    return sanitizeFileTransferAbortMessage(value);
   }
 
   return undefined;
@@ -1728,8 +1859,21 @@ export function sanitizeFileTransferChunkMessage(value: Record<string, unknown>)
 
 export function sanitizeFileTransferCompleteMessage(value: Record<string, unknown>): FileTransferCompleteMessage | undefined {
   const transferId = sanitizeString(value.transferId, maxFileTransferIdLength);
+  const checksum = sanitizeChecksum(value.checksum);
+  return transferId && checksum
+    ? { kind: "file-transfer-complete", transferId, checksum }
+    : undefined;
+}
+
+export function sanitizeFileTransferAbortMessage(value: Record<string, unknown>): FileTransferAbortMessage | undefined {
+  const transferId = sanitizeString(value.transferId, maxFileTransferIdLength);
+  const reason = sanitizeString(value.reason, fileTransferReasonMaxLength, false);
   return transferId
-    ? { kind: "file-transfer-complete", transferId }
+    ? {
+        kind: "file-transfer-abort",
+        transferId,
+        ...(typeof reason === "string" ? { reason } : {})
+      }
     : undefined;
 }
 
@@ -1790,6 +1934,15 @@ function sanitizeMimeType(value: unknown): string | undefined {
   return mimeTypePattern.test(mimeType) ? mimeType : undefined;
 }
 
+function sanitizeChecksum(value: unknown): string | undefined {
+  const checksum = sanitizeString(value, 8, false);
+  if (!checksum) {
+    return undefined;
+  }
+
+  return checksumPattern.test(checksum) ? checksum.toLowerCase() : undefined;
+}
+
 function sanitizeClipboardImageDataUrl(value: unknown): string | undefined {
   const imageDataUrl = sanitizeString(value, maxClipboardImageDataUrlLength, false);
   if (!imageDataUrl || !imageDataUrlPrefixPattern.test(imageDataUrl)) {
@@ -1823,6 +1976,24 @@ function sanitizeBase64(value: unknown, maxLength: number, maxDecodedBytes: numb
   }
 
   return normalized;
+}
+
+function createFileTransferChecksum(): number {
+  return 0x811c9dc5;
+}
+
+function updateFileTransferChecksum(checksum: number, bytes: Uint8Array): number {
+  let next = checksum >>> 0;
+  for (const byte of bytes) {
+    next ^= byte;
+    next = Math.imul(next, 0x01000193) >>> 0;
+  }
+
+  return next >>> 0;
+}
+
+function formatFileTransferChecksum(checksum: number): string {
+  return (checksum >>> 0).toString(16).padStart(8, "0");
 }
 
 function readClipboardDataForSync(): ClipboardData {

@@ -4,7 +4,9 @@ import { test } from "node:test";
 import {
   parseDataChannelMessage,
   sanitizeClipboardSyncMessage,
+  sanitizeFileTransferAbortMessage,
   sanitizeFileTransferChunkMessage,
+  sanitizeFileTransferCompleteMessage,
   sanitizeFileTransferStartMessage,
   sanitizeHostCommandMessage,
   sanitizeHostStateMessage
@@ -104,4 +106,30 @@ test("file transfer validation enforces mime types and decoded chunk size", () =
     index: 0,
     data: oversizedChunk
   }), undefined);
+
+  assert.deepEqual(sanitizeFileTransferCompleteMessage({
+    kind: "file-transfer-complete",
+    transferId: "t1",
+    checksum: "0abc1234"
+  }), {
+    kind: "file-transfer-complete",
+    transferId: "t1",
+    checksum: "0abc1234"
+  });
+
+  assert.equal(sanitizeFileTransferCompleteMessage({
+    kind: "file-transfer-complete",
+    transferId: "t1",
+    checksum: "bad-checksum"
+  }), undefined);
+
+  assert.deepEqual(sanitizeFileTransferAbortMessage({
+    kind: "file-transfer-abort",
+    transferId: "t1",
+    reason: "Timed out"
+  }), {
+    kind: "file-transfer-abort",
+    transferId: "t1",
+    reason: "Timed out"
+  });
 });

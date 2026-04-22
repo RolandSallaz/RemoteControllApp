@@ -224,7 +224,7 @@ test("viewer join handles missing host or approval rate limits", async () => {
     const limitedApproval = createGatewayHarness({
       hostSettings: { requireViewerApproval: true },
       verifyPasswordResult: true,
-      hostApprovalResponse: { approved: true }
+      hostApprovalResponse: { approved: false }
     });
     limitedApproval.gateway.handleConnection(limitedApproval.client as never);
     limitedApproval.server.sockets.sockets.set("host-1", limitedApproval.hostSocket as never);
@@ -233,13 +233,44 @@ test("viewer join handles missing host or approval rate limits", async () => {
       sessionId: "LAN",
       role: "viewer"
     });
-    const blocked = await limitedApproval.gateway.joinSession(limitedApproval.client as never, {
+
+    const secondClient = createFakeClient("client-2", "10.0.0.5");
+    limitedApproval.gateway.handleConnection(secondClient as never);
+    const blocked = await limitedApproval.gateway.joinSession(secondClient as never, {
       sessionId: "LAN",
       role: "viewer"
     });
 
     assert.deepEqual(blocked, { error: "Too many approval requests, try again later" });
   });
+});
+
+test("viewer join reuses a recent approval without prompting the host again", async () => {
+  const approved = createGatewayHarness({
+    hostSettings: { requireViewerApproval: true },
+    verifyPasswordResult: true,
+    hostApprovalResponse: { approved: true }
+  });
+  approved.gateway.handleConnection(approved.client as never);
+  approved.server.sockets.sockets.set("host-1", approved.hostSocket as never);
+
+  const firstJoin = await approved.gateway.joinSession(approved.client as never, {
+    sessionId: "LAN",
+    role: "viewer",
+    displayName: "Viewer"
+  });
+  const approvalCallsAfterFirstJoin = approved.hostSocket.timeoutEmitCalls.length;
+
+  const secondJoin = await approved.gateway.joinSession(approved.client as never, {
+    sessionId: "LAN",
+    role: "viewer",
+    displayName: "Viewer"
+  });
+
+  assert.deepEqual(firstJoin, { clientId: "client-1" });
+  assert.deepEqual(secondJoin, { clientId: "client-1" });
+  assert.equal(approvalCallsAfterFirstJoin, 1);
+  assert.equal(approved.hostSocket.timeoutEmitCalls.length, 1);
 });
 
 test("heartbeat and shutdown validate membership and role", () => {
@@ -349,6 +380,28 @@ test("relayOffer relayAnswer and relayIceCandidate validate membership and route
       fromClientId: "client-1"
     }
   });
+});
+
+test("relayOffer preserves SDP formatting without trimming", () => {
+  const { gateway, client, sessions, server } = createGatewayHarness();
+  sessions.hasPeerResult = true;
+
+  const sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\na=max-message-size:262144\r\n";
+  gateway.relayOffer(client as never, {
+    sessionId: "LAN",
+    description: { type: "offer", sdp }
+  });
+
+  assert.deepEqual(client.broadcastEmits[0], {
+    room: "session:LAN",
+    event: "signal:offer",
+    payload: {
+      sessionId: "LAN",
+      description: { type: "offer", sdp },
+      fromClientId: "client-1"
+    }
+  });
+  assert.equal(server.directEmits.length, 0);
 });
 
 test("module lifecycle and cleanupExpiredPeers clear timers and emit session:left for stale peers", () => {
