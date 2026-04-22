@@ -16,58 +16,6 @@ let backendProcess: ChildProcess | undefined;
 let backendStatus: EmbeddedBackendStatus = { status: "disabled" };
 let backendLogStream: WriteStream | undefined;
 
-export async function restartEmbeddedBackend(preferredPort: number): Promise<EmbeddedBackendStatus> {
-  stopEmbeddedBackend();
-  const port = await findAvailablePort(preferredPort);
-  const url = `http://localhost:${port}`;
-  backendStatus = { status: "starting", port, url };
-
-  const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
-  const env = {
-    ...process.env,
-    PORT: String(port),
-    CORS_ORIGIN: process.env.CORS_ORIGIN ?? "*",
-    DISCOVERY_ENABLED: "true",
-    REMOTE_CONTROL_SERVER_NAME: process.env.REMOTE_CONTROL_SERVER_NAME ?? "RemoteControl Server"
-  };
-
-  const spawnConfig = isDev ? getDevBackendSpawnConfig() : getPackagedBackendSpawnConfig();
-
-  backendProcess = spawn(spawnConfig.command, spawnConfig.args, {
-    cwd: spawnConfig.cwd,
-    env: { ...env, ...spawnConfig.env },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true
-  });
-
-  backendLogStream = createWriteStream(join(app.getPath("userData"), "backend.log"), { flags: "a" });
-  backendProcess.stdout?.pipe(backendLogStream, { end: false });
-  backendProcess.stderr?.pipe(backendLogStream, { end: false });
-
-  backendProcess.once("spawn", () => {
-    backendStatus = { status: "running", port, url };
-  });
-
-  backendProcess.once("error", (error) => {
-    backendStatus = { status: "error", port, url, error: error.message };
-    backendProcess = undefined;
-  });
-
-  backendProcess.once("exit", (code, signal) => {
-    backendStatus = {
-      status: "stopped",
-      port,
-      url,
-      error: code === 0 || code === null ? undefined : `Exited with code ${code}${signal ? ` (${signal})` : ""}`
-    };
-    backendLogStream?.end();
-    backendLogStream = undefined;
-    backendProcess = undefined;
-  });
-
-  return backendStatus;
-}
-
 export async function startEmbeddedBackend(options: {
   appMode: "combined" | "host" | "viewer";
   isDev: boolean;

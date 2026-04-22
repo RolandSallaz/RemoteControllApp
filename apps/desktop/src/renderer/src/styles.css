@@ -826,28 +826,6 @@ button:focus-visible {
   color: var(--danger);
 }
 
-.port-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.btn-restart {
-  flex-shrink: 0;
-  height: 34px;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.btn-restart:hover:not(:disabled) {
-  background: var(--accent);
-  color: #fff;
-}
-
 /* ── Divider ───────────────────────────────── */
 
 .divider {

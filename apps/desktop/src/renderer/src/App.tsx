@@ -28,8 +28,6 @@ export function App(): ReactElement {
   const [activeRemoteSourceId, setActiveRemoteSourceId] = useState<string | undefined>();
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
-  const [portInput, setPortInput] = useState("47315");
-  const [isRestarting, setIsRestarting] = useState(false);
   const [backendStatus, setBackendStatus] = useState<EmbeddedBackendStatus>({ status: "disabled" });
   const [captureMode, setCaptureMode] = useState<CaptureMode>("desktop");
   const [frameRate, setFrameRate] = useState<FrameRate>(30);
@@ -91,19 +89,6 @@ export function App(): ReactElement {
 
     void scanServers();
   }, [role]);
-
-  useEffect(() => {
-    if (appMode !== "host") return;
-
-    async function pollBackend(): Promise<void> {
-      const backend = await window.remoteControl.getBackendStatus();
-      if (backend.port) setPortInput(String(backend.port));
-    }
-
-    void pollBackend();
-    const interval = window.setInterval(() => void pollBackend(), 2000);
-    return () => window.clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     if (appMode !== "host" || role !== "host" || isConnected || hostAutoConnectStartedRef.current) {
@@ -222,23 +207,6 @@ export function App(): ReactElement {
     }
   }
 
-  async function handleRestartBackend(): Promise<void> {
-    const port = parseInt(portInput, 10);
-    if (!port || port < 1024 || port > 65535) return;
-    setIsRestarting(true);
-    try {
-      if (isConnected) disconnect();
-      hostAutoConnectStartedRef.current = false;
-      const next = await window.remoteControl.restartBackend(port);
-      if (next.url) setServerUrl(next.url);
-      setStatus(`Server restarted on port ${next.port}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setIsRestarting(false);
-    }
-  }
-
   const canConnect = Boolean(serverUrl.trim() && sessionId.trim() && (role === "viewer" || selectedSourceId));
 
   return (
@@ -277,30 +245,6 @@ export function App(): ReactElement {
                   </div>
                 </div>
 
-                {appMode !== "host" && (
-                <div className="port-row">
-                  <div className="field" style={{ flex: 1, margin: 0 }}>
-                    <label>Port</label>
-                    <input
-                      type="number"
-                      min={1024}
-                      max={65535}
-                      value={portInput}
-                      onChange={(e) => setPortInput(e.target.value)}
-                      disabled={isRestarting}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-restart"
-                    onClick={() => void handleRestartBackend()}
-                    disabled={isRestarting || portInput === String(backendStatus.port)}
-                    title="Restart server on this port"
-                  >
-                    {isRestarting ? "…" : "Restart"}
-                  </button>
-                </div>
-                )}
               </div>
             </>
           )}

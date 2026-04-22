@@ -21,7 +21,6 @@ declare global {
       appMode: DesktopAppMode;
       productName: string;
       getBackendStatus: () => Promise<EmbeddedBackendStatus>;
-      restartBackend: (port: number) => Promise<EmbeddedBackendStatus>;
       discoverServers: () => Promise<DiscoveredServer[]>;
       getDesktopSources: () => Promise<DesktopCaptureSource[]>;
       applyControlMessage: (message: ControlMessage) => Promise<{ ok: boolean; error?: string }>;

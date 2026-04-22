@@ -6,7 +6,7 @@ import { app, BrowserWindow, Menu, desktopCapturer, ipcMain, shell } from "elect
 import type { ControlMessage } from "@remote-control/shared";
 
 import { discoverServers } from "./discoveryClient.js";
-import { getEmbeddedBackendStatus, restartEmbeddedBackend, startEmbeddedBackend, stopEmbeddedBackend } from "./backendProcess.js";
+import { getEmbeddedBackendStatus, startEmbeddedBackend, stopEmbeddedBackend } from "./backendProcess.js";
 import { applyHostControl } from "./hostControl.js";
 
 declare const __REMOTE_CONTROL_APP_MODE__: "combined" | "host" | "viewer";
@@ -148,10 +148,6 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("backend:status", () => getEmbeddedBackendStatus());
-
-  ipcMain.handle("backend:restart", (_event, preferredPort: number) =>
-    restartEmbeddedBackend(preferredPort)
-  );
 
   ipcMain.handle("discovery:scan", async () => {
     return await discoverServers();

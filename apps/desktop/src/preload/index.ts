@@ -9,7 +9,6 @@ contextBridge.exposeInMainWorld("remoteControl", {
   appMode,
   productName: getProductName(appMode),
   getBackendStatus: () => ipcRenderer.invoke("backend:status"),
-  restartBackend: (port: number) => ipcRenderer.invoke("backend:restart", port),
   discoverServers: () => ipcRenderer.invoke("discovery:scan"),
   getDesktopSources: () => ipcRenderer.invoke("desktop:get-sources"),
   applyControlMessage: (message: ControlMessage) => ipcRenderer.invoke("control:message", message)
