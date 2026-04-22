@@ -20,6 +20,20 @@ export type JoinSessionResponse =
       passwordRequired?: boolean;
     };
 
+export type ViewerApprovalRequestPayload = {
+  requestId: string;
+  sessionId: SessionId;
+  clientId: ClientId;
+  displayName?: string;
+  requestedAt: number;
+  expiresAt: number;
+};
+
+export type ViewerApprovalResponsePayload = {
+  approved: boolean;
+  reason?: string;
+};
+
 export type ViewerShortcutSettings = {
   disconnectShortcut: string;
   switchMonitorShortcut: string;
@@ -33,6 +47,20 @@ export type PeerJoinedPayload = {
 
 export type PeerLeftPayload = {
   clientId: ClientId;
+};
+
+export type SessionHeartbeatPayload = {
+  sessionId: SessionId;
+};
+
+export type SessionShutdownRequest = {
+  sessionId: SessionId;
+  reason?: string;
+};
+
+export type SessionShutdownPayload = {
+  clientId: ClientId;
+  reason: string;
 };
 
 export type SignalTargetPayload = {
@@ -71,8 +99,14 @@ export type TurnConfigPayload = {
 };
 
 export type HostSettings = {
+  /**
+   * Deprecated legacy plaintext field. New writes store accessPasswordHash.
+   */
   accessPassword?: string;
+  accessPasswordHash?: string;
+  accessPasswordSet?: boolean;
   launchOnStartup?: boolean;
+  requireViewerApproval?: boolean;
   saveDirectory?: string;
 };
 
@@ -177,7 +211,9 @@ export type HostCommandMessage = {
 
 export type ClipboardSyncMessage = {
   kind: "clipboard-sync";
-  text: string;
+  text?: string;
+  html?: string;
+  imageDataUrl?: string;
 };
 
 export type FileTransferStartMessage = {
@@ -210,8 +246,13 @@ export type DataChannelMessage =
   | FileTransferCompleteMessage;
 
 export type ServerToClientEvents = {
+  "session:approval-request": (
+    payload: ViewerApprovalRequestPayload,
+    ack: (response: ViewerApprovalResponsePayload) => void
+  ) => void;
   "session:joined": (payload: PeerJoinedPayload) => void;
   "session:left": (payload: PeerLeftPayload) => void;
+  "session:shutdown": (payload: SessionShutdownPayload) => void;
   "signal:offer": (payload: WebRtcDescriptionPayload & { fromClientId: ClientId }) => void;
   "signal:answer": (payload: WebRtcDescriptionPayload & { fromClientId: ClientId }) => void;
   "signal:ice-candidate": (payload: IceCandidatePayload & { fromClientId: ClientId }) => void;
@@ -221,6 +262,8 @@ export type ServerToClientEvents = {
 
 export type ClientToServerEvents = {
   "session:join": (payload: JoinSessionPayload, ack?: (response: JoinSessionResponse) => void) => void;
+  "session:heartbeat": (payload: SessionHeartbeatPayload) => void;
+  "session:shutdown": (payload: SessionShutdownRequest) => void;
   "signal:offer": (payload: WebRtcDescriptionPayload) => void;
   "signal:answer": (payload: WebRtcDescriptionPayload) => void;
   "signal:ice-candidate": (payload: IceCandidatePayload) => void;

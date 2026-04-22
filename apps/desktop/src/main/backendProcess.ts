@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createWriteStream, existsSync, renameSync, statSync, unlinkSync, type WriteStream } from "node:fs";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -15,6 +16,9 @@ export type EmbeddedBackendStatus = {
 let backendProcess: ChildProcess | undefined;
 let backendStatus: EmbeddedBackendStatus = { status: "disabled" };
 let backendLogStream: WriteStream | undefined;
+let backendSettingsToken: string | undefined;
+const backendLogMaxBytes = 5 * 1024 * 1024;
+const backendLogBackups = 3;
 
 export async function startEmbeddedBackend(options: {
   appMode: "combined" | "host" | "viewer";
@@ -31,6 +35,7 @@ export async function startEmbeddedBackend(options: {
 
   const port = await findAvailablePort(Number(process.env.REMOTE_CONTROL_BACKEND_PORT ?? 47315));
   const url = `http://localhost:${port}`;
+  backendSettingsToken = randomBytes(32).toString("base64url");
   backendStatus = { status: "starting", port, url };
 
   const env = {
@@ -38,6 +43,7 @@ export async function startEmbeddedBackend(options: {
     PORT: String(port),
     CORS_ORIGIN: process.env.CORS_ORIGIN ?? "*",
     DISCOVERY_ENABLED: "true",
+    REMOTE_CONTROL_SETTINGS_TOKEN: backendSettingsToken,
     REMOTE_CONTROL_SERVER_NAME: process.env.REMOTE_CONTROL_SERVER_NAME ?? "RemoteControl Server",
     REMOTE_CONTROL_SETTINGS_PATH: join(app.getPath("userData"), "host-settings.json")
   };
@@ -54,7 +60,7 @@ export async function startEmbeddedBackend(options: {
     windowsHide: true
   });
 
-  backendLogStream = createWriteStream(join(app.getPath("userData"), "backend.log"), { flags: "a" });
+  backendLogStream = openBackendLogStream();
   backendProcess.stdout?.pipe(backendLogStream, { end: false });
   backendProcess.stderr?.pipe(backendLogStream, { end: false });
 
@@ -64,7 +70,9 @@ export async function startEmbeddedBackend(options: {
 
   backendProcess.once("error", (error) => {
     backendStatus = { status: "error", port, url, error: error.message };
+    closeBackendLogStream();
     backendProcess = undefined;
+    backendSettingsToken = undefined;
   });
 
   backendProcess.once("exit", (code, signal) => {
@@ -74,9 +82,9 @@ export async function startEmbeddedBackend(options: {
       url,
       error: code === 0 || code === null ? undefined : `Exited with code ${code}${signal ? ` (${signal})` : ""}`
     };
-    backendLogStream?.end();
-    backendLogStream = undefined;
+    closeBackendLogStream();
     backendProcess = undefined;
+    backendSettingsToken = undefined;
   });
 
   return backendStatus;
@@ -86,6 +94,10 @@ export function getEmbeddedBackendStatus(): EmbeddedBackendStatus {
   return backendStatus;
 }
 
+export function getEmbeddedBackendSettingsToken(): string | undefined {
+  return backendSettingsToken;
+}
+
 export function stopEmbeddedBackend(): void {
   if (!backendProcess) {
     return;
@@ -93,9 +105,45 @@ export function stopEmbeddedBackend(): void {
 
   backendProcess.kill();
   backendProcess = undefined;
+  backendSettingsToken = undefined;
+  closeBackendLogStream();
+  backendStatus = { ...backendStatus, status: "stopped" };
+}
+
+function openBackendLogStream(): WriteStream {
+  const logPath = join(app.getPath("userData"), "backend.log");
+  rotateBackendLog(logPath);
+  return createWriteStream(logPath, { flags: "a" });
+}
+
+function closeBackendLogStream(): void {
   backendLogStream?.end();
   backendLogStream = undefined;
-  backendStatus = { ...backendStatus, status: "stopped" };
+}
+
+function rotateBackendLog(logPath: string): void {
+  try {
+    if (!existsSync(logPath) || statSync(logPath).size < backendLogMaxBytes) {
+      return;
+    }
+
+    const oldestLogPath = `${logPath}.${backendLogBackups}`;
+    if (existsSync(oldestLogPath)) {
+      unlinkSync(oldestLogPath);
+    }
+
+    for (let index = backendLogBackups - 1; index >= 1; index -= 1) {
+      const currentPath = `${logPath}.${index}`;
+      if (existsSync(currentPath)) {
+        renameSync(currentPath, `${logPath}.${index + 1}`);
+      }
+    }
+
+    renameSync(logPath, `${logPath}.1`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to rotate backend log: ${reason}`);
+  }
 }
 
 function getDevBackendSpawnConfig(): {

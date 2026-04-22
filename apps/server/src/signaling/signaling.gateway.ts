@@ -1,4 +1,4 @@
-import { Inject } from "@nestjs/common";
+import { Inject, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import {
   ConnectedSocket,
   MessageBody,
@@ -12,17 +12,22 @@ import type {
   ClientToServerEvents,
   IceCandidatePayload,
   JoinSessionPayload,
+  SessionHeartbeatPayload,
+  SessionShutdownRequest,
   ServerToClientEvents,
+  ViewerApprovalRequestPayload,
+  ViewerApprovalResponsePayload,
   WebRtcDescriptionPayload
 } from "@remote-control/shared";
 import type { Server, Socket } from "socket.io";
 
-import { SessionsService } from "./sessions.service.js";
+import { SessionCapacityError, SessionsService } from "./sessions.service.js";
 import { SettingsService } from "../settings/settings.service.js";
 import { TurnService } from "../turn/turn.service.js";
 
 type ClientSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SignalingServer = Server<ClientToServerEvents, ServerToClientEvents>;
+const viewerApprovalTimeoutMs = 30_000;
 
 @WebSocketGateway({
   cors: {
@@ -31,9 +36,10 @@ type SignalingServer = Server<ClientToServerEvents, ServerToClientEvents>;
   },
   transports: ["websocket"]
 })
-export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy {
   @WebSocketServer()
   private readonly server!: SignalingServer;
+  private stalePeerCleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     @Inject(SessionsService)
@@ -43,6 +49,20 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @Inject(TurnService)
     private readonly turn: TurnService
   ) {}
+
+  onModuleInit(): void {
+    this.stalePeerCleanupTimer = setInterval(() => {
+      this.cleanupExpiredPeers();
+    }, 30_000);
+    this.stalePeerCleanupTimer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.stalePeerCleanupTimer) {
+      clearInterval(this.stalePeerCleanupTimer);
+      this.stalePeerCleanupTimer = undefined;
+    }
+  }
 
   handleConnection(client: ClientSocket): void {
     client.emit("turn:config", this.turn.getIceConfig());
@@ -64,21 +84,33 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     @ConnectedSocket() client: ClientSocket,
     @MessageBody() payload: JoinSessionPayload
   ): Promise<{ clientId: string } | { error: string; passwordRequired?: boolean } | undefined> {
-    if (!payload.sessionId || !payload.role) {
+    const joinPayload = sanitizeJoinSessionPayload(payload);
+    if (!joinPayload) {
       client.emit("error", { message: "sessionId and role are required" });
       return undefined;
     }
 
-    if (payload.role === "viewer") {
+    this.cleanupExpiredPeers();
+
+    if (joinPayload.role === "viewer") {
       const settings = await this.settings.getHostSettings();
-      const accessPassword = settings.accessPassword?.trim();
-      if (accessPassword && payload.password !== accessPassword) {
-        const message = payload.password ? "Invalid server password" : "Server password required";
+      const passwordAccepted = await this.settings.verifyHostPassword(joinPayload.password);
+      if (!passwordAccepted) {
+        const message = joinPayload.password ? "Invalid server password" : "Server password required";
         client.emit("error", { message });
         return {
           error: message,
           passwordRequired: true
         };
+      }
+
+      if (settings.requireViewerApproval ?? true) {
+        const approved = await this.requestViewerApproval(client, joinPayload);
+        if (!approved) {
+          const message = "Connection rejected by host";
+          client.emit("error", { message });
+          return { error: message };
+        }
       }
     }
 
@@ -87,13 +119,22 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       await client.leave(this.roomName(previousSession.sessionId));
     }
 
-    const existingPeers = this.sessions.addPeer(payload.sessionId, {
-      clientId: client.id,
-      role: payload.role,
-      displayName: payload.displayName
-    });
+    let existingPeers: ReturnType<SessionsService["addPeer"]>;
+    try {
+      existingPeers = this.sessions.addPeer(joinPayload.sessionId, {
+        clientId: client.id,
+        role: joinPayload.role,
+        displayName: joinPayload.displayName
+      });
+    } catch (error) {
+      const message = error instanceof SessionCapacityError
+        ? error.message
+        : "Could not join session";
+      client.emit("error", { message });
+      return { error: message };
+    }
 
-    await client.join(this.roomName(payload.sessionId));
+    await client.join(this.roomName(joinPayload.sessionId));
 
     client.emit("turn:config", this.turn.getIceConfig());
 
@@ -101,13 +142,42 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       client.emit("session:joined", peer);
     }
 
-    client.to(this.roomName(payload.sessionId)).emit("session:joined", {
+    client.to(this.roomName(joinPayload.sessionId)).emit("session:joined", {
       clientId: client.id,
-      role: payload.role,
-      displayName: payload.displayName
+      role: joinPayload.role,
+      displayName: joinPayload.displayName
     });
 
     return { clientId: client.id };
+  }
+
+  @SubscribeMessage("session:heartbeat")
+  handleHeartbeat(@ConnectedSocket() client: ClientSocket, @MessageBody() payload: SessionHeartbeatPayload): void {
+    const sessionId = sanitizeSessionId(payload?.sessionId);
+    if (!sessionId || !this.sessions.touchPeer(sessionId, client.id)) {
+      return;
+    }
+  }
+
+  @SubscribeMessage("session:shutdown")
+  announceShutdown(@ConnectedSocket() client: ClientSocket, @MessageBody() payload: SessionShutdownRequest): void {
+    const shutdownPayload = sanitizeSessionShutdownRequest(payload);
+    const membership = this.sessions.getPeer(client.id);
+    if (!shutdownPayload || !membership || membership.sessionId !== shutdownPayload.sessionId) {
+      client.emit("error", { message: "Client is not a member of this session" });
+      return;
+    }
+
+    this.sessions.touchPeer(shutdownPayload.sessionId, client.id);
+    if (membership.peer.role !== "host") {
+      client.emit("error", { message: "Only the host can announce shutdown" });
+      return;
+    }
+
+    client.to(this.roomName(shutdownPayload.sessionId)).emit("session:shutdown", {
+      clientId: client.id,
+      reason: shutdownPayload.reason ?? "Host is shutting down"
+    });
   }
 
   @SubscribeMessage("signal:offer")
@@ -122,22 +192,23 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   @SubscribeMessage("signal:ice-candidate")
   relayIceCandidate(@ConnectedSocket() client: ClientSocket, @MessageBody() payload: IceCandidatePayload): void {
-    if (!this.sessions.hasPeer(payload.sessionId, client.id)) {
+    const candidatePayload = sanitizeIceCandidatePayload(payload);
+    if (!candidatePayload || !this.sessions.hasPeer(candidatePayload.sessionId, client.id)) {
       client.emit("error", { message: "Client is not a member of this session" });
       return;
     }
 
     const eventPayload = {
-      ...payload,
+      ...candidatePayload,
       fromClientId: client.id
     };
 
-    if (payload.targetClientId) {
-      this.server.to(payload.targetClientId).emit("signal:ice-candidate", eventPayload);
+    if (candidatePayload.targetClientId) {
+      this.server.to(candidatePayload.targetClientId).emit("signal:ice-candidate", eventPayload);
       return;
     }
 
-    client.to(this.roomName(payload.sessionId)).emit("signal:ice-candidate", eventPayload);
+    client.to(this.roomName(candidatePayload.sessionId)).emit("signal:ice-candidate", eventPayload);
   }
 
   private relayDescription(
@@ -145,25 +216,218 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     eventName: "signal:offer" | "signal:answer",
     payload: WebRtcDescriptionPayload
   ): void {
-    if (!this.sessions.hasPeer(payload.sessionId, client.id)) {
+    const descriptionPayload = sanitizeWebRtcDescriptionPayload(payload);
+    if (!descriptionPayload || !this.sessions.hasPeer(descriptionPayload.sessionId, client.id)) {
       client.emit("error", { message: "Client is not a member of this session" });
       return;
     }
 
     const eventPayload = {
-      ...payload,
+      ...descriptionPayload,
       fromClientId: client.id
     };
 
-    if (payload.targetClientId) {
-      this.server.to(payload.targetClientId).emit(eventName, eventPayload);
+    if (descriptionPayload.targetClientId) {
+      this.server.to(descriptionPayload.targetClientId).emit(eventName, eventPayload);
       return;
     }
 
-    client.to(this.roomName(payload.sessionId)).emit(eventName, eventPayload);
+    client.to(this.roomName(descriptionPayload.sessionId)).emit(eventName, eventPayload);
+  }
+
+  private async requestViewerApproval(client: ClientSocket, payload: JoinSessionPayload): Promise<boolean> {
+    const hostPeer = this.sessions.getPeerByRole(payload.sessionId, "host");
+    if (!hostPeer) {
+      return false;
+    }
+
+    const hostSocket = this.server.sockets.sockets.get(hostPeer.clientId) as ClientSocket | undefined;
+    if (!hostSocket) {
+      return false;
+    }
+
+    const requestedAt = Date.now();
+    const request: ViewerApprovalRequestPayload = {
+      requestId: createApprovalRequestId(),
+      sessionId: payload.sessionId,
+      clientId: client.id,
+      displayName: payload.displayName,
+      requestedAt,
+      expiresAt: requestedAt + viewerApprovalTimeoutMs
+    };
+
+    return await new Promise<boolean>((resolve) => {
+      hostSocket.timeout(viewerApprovalTimeoutMs).emit(
+        "session:approval-request",
+        request,
+        (error: Error | null, response?: ViewerApprovalResponsePayload) => {
+          if (error) {
+            resolve(false);
+            return;
+          }
+
+          resolve(Boolean(response?.approved));
+        }
+      );
+    });
   }
 
   private roomName(sessionId: string): string {
     return `session:${sessionId}`;
   }
+
+  private cleanupExpiredPeers(): void {
+    for (const removedPeer of this.sessions.removeExpiredPeers()) {
+      this.server.to(this.roomName(removedPeer.sessionId)).emit("session:left", {
+        clientId: removedPeer.peer.clientId
+      });
+    }
+  }
+}
+
+function sanitizeShutdownReason(reason?: string): string {
+  const normalized = reason?.trim();
+  return normalized ? normalized.slice(0, 160) : "Host is shutting down";
+}
+
+function createApprovalRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeJoinSessionPayload(payload: unknown): JoinSessionPayload | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  const sessionId = sanitizeSessionId(payload.sessionId);
+  const role = payload.role;
+  if (!sessionId || (role !== "host" && role !== "viewer")) {
+    return undefined;
+  }
+
+  const displayName = sanitizeOptionalString(payload.displayName, 80);
+  const password = sanitizeOptionalString(payload.password, 256);
+  return {
+    sessionId,
+    role,
+    ...(displayName ? { displayName } : {}),
+    ...(typeof password === "string" ? { password } : {})
+  };
+}
+
+function sanitizeSessionShutdownRequest(payload: unknown): SessionShutdownRequest | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  const sessionId = sanitizeSessionId(payload.sessionId);
+  if (!sessionId) {
+    return undefined;
+  }
+
+  return {
+    sessionId,
+    reason: sanitizeShutdownReason(typeof payload.reason === "string" ? payload.reason : undefined)
+  };
+}
+
+function sanitizeWebRtcDescriptionPayload(payload: unknown): WebRtcDescriptionPayload | undefined {
+  if (!isRecord(payload) || !isRecord(payload.description)) {
+    return undefined;
+  }
+
+  const sessionId = sanitizeSessionId(payload.sessionId);
+  const targetClientId = sanitizeOptionalString(payload.targetClientId, 128);
+  const descriptionType = payload.description.type;
+  const sdp = sanitizeOptionalString(payload.description.sdp, 1_000_000);
+  if (!sessionId || !isRtcDescriptionType(descriptionType)) {
+    return undefined;
+  }
+
+  return {
+    sessionId,
+    ...(targetClientId ? { targetClientId } : {}),
+    description: {
+      type: descriptionType,
+      ...(typeof sdp === "string" ? { sdp } : {})
+    }
+  };
+}
+
+function sanitizeIceCandidatePayload(payload: unknown): IceCandidatePayload | undefined {
+  if (!isRecord(payload) || !isRecord(payload.candidate)) {
+    return undefined;
+  }
+
+  const sessionId = sanitizeSessionId(payload.sessionId);
+  const targetClientId = sanitizeOptionalString(payload.targetClientId, 128);
+  const candidate = sanitizeOptionalString(payload.candidate.candidate, 4096);
+  if (!sessionId || typeof candidate !== "string") {
+    return undefined;
+  }
+
+  const sdpMid = sanitizeNullableString(payload.candidate.sdpMid, 64);
+  const sdpMLineIndex = sanitizeNullableInteger(payload.candidate.sdpMLineIndex, 0, 255);
+  const usernameFragment = sanitizeNullableString(payload.candidate.usernameFragment, 256);
+
+  return {
+    sessionId,
+    ...(targetClientId ? { targetClientId } : {}),
+    candidate: {
+      candidate,
+      ...(sdpMid !== undefined ? { sdpMid } : {}),
+      ...(sdpMLineIndex !== undefined ? { sdpMLineIndex } : {}),
+      ...(usernameFragment !== undefined ? { usernameFragment } : {})
+    }
+  };
+}
+
+function sanitizeSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(normalized)) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function sanitizeOptionalString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized.length <= maxLength ? normalized : undefined;
+}
+
+function sanitizeNullableString(value: unknown, maxLength: number): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  return sanitizeOptionalString(value, maxLength);
+}
+
+function sanitizeNullableInteger(value: unknown, min: number, max: number): number | null | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isInteger(value) && value >= min && value <= max) {
+    return value;
+  }
+
+  return undefined;
+}
+
+function isRtcDescriptionType(value: unknown): value is "answer" | "offer" | "pranswer" | "rollback" {
+  return value === "answer" || value === "offer" || value === "pranswer" || value === "rollback";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

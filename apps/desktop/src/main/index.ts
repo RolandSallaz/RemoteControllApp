@@ -1,13 +1,20 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes, scrypt as scryptCallback } from "node:crypto";
+import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { app, BrowserWindow, Menu, Notification, Tray, desktopCapturer, dialog, ipcMain, nativeImage, shell } from "electron";
 import type { ControlMessage, HostSettings, UpdateHostSettingsPayload } from "@remote-control/shared";
 
 import { discoverServers } from "./discoveryClient.js";
-import { getEmbeddedBackendStatus, startEmbeddedBackend, stopEmbeddedBackend } from "./backendProcess.js";
+import {
+  getEmbeddedBackendSettingsToken,
+  getEmbeddedBackendStatus,
+  startEmbeddedBackend,
+  stopEmbeddedBackend
+} from "./backendProcess.js";
 import { applyHostControl } from "./hostControl.js";
 import { startAutoUpdate } from "./updater.js";
 
@@ -19,11 +26,18 @@ const appMode = normalizeAppMode(__REMOTE_CONTROL_APP_MODE__);
 const productName = getProductName(appMode);
 const windowTitle = `${productName} v${app.getVersion()}`;
 const settingsPath = join(app.getPath("userData"), "settings.json");
+const scrypt = promisify(scryptCallback);
+const passwordHashPrefix = "scrypt:v1";
+const passwordSaltBytes = 16;
+const passwordKeyBytes = 32;
+const incomingFileSaves = new Map<string, IncomingFileSaveSession>();
 let mainWindow: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+let hostShutdownNotificationSent = false;
 let lastViewerName: string | undefined;
+const hostShutdownGracePeriodMs = 350;
 
 configureAppProfile();
 
@@ -50,7 +64,7 @@ function createWindow(): void {
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    openTrustedExternalUrl(url);
     return { action: "deny" };
   });
 
@@ -146,7 +160,13 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  if (shouldDelayQuitForHostShutdown()) {
+    event.preventDefault();
+    notifyHostShutdownAndQuit();
+    return;
+  }
+
   isQuitting = true;
   stopEmbeddedBackend();
 });
@@ -238,13 +258,17 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:get-host-access-settings", async () => {
     if (appMode !== "host") {
       return {
-        accessPassword: ""
+        accessPassword: "",
+        accessPasswordSet: false,
+        requireViewerApproval: true
       };
     }
 
     const settings = await readHostSettingsFile();
     return {
-      accessPassword: settings.accessPassword ?? ""
+      accessPassword: settings.accessPasswordHash ? "" : settings.accessPassword ?? "",
+      accessPasswordSet: Boolean(settings.accessPasswordHash || settings.accessPassword),
+      requireViewerApproval: settings.requireViewerApproval ?? true
     };
   });
 
@@ -256,12 +280,41 @@ function registerIpcHandlers(): void {
     try {
       const normalizedPassword = password.trim();
       const settings = await readHostSettingsFile();
+      const {
+        accessPassword: _legacyAccessPassword,
+        accessPasswordHash: _previousAccessPasswordHash,
+        ...safeSettings
+      } = settings;
       const nextSettings = {
-        ...settings,
-        accessPassword: normalizedPassword || undefined
+        ...safeSettings,
+        accessPasswordHash: normalizedPassword
+          ? await hashAccessPassword(normalizedPassword)
+          : undefined
       };
       await writeHostSettingsFile(nextSettings);
-      return { ok: true, accessPassword: nextSettings.accessPassword ?? "" };
+      return {
+        ok: true,
+        accessPassword: "",
+        accessPasswordSet: Boolean(normalizedPassword)
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: reason };
+    }
+  });
+
+  ipcMain.handle("app:set-require-viewer-approval", async (_event, enabled: boolean) => {
+    if (appMode !== "host") {
+      return { ok: false, error: "Host approval settings are available only in host mode" };
+    }
+
+    try {
+      const settings = await readHostSettingsFile();
+      await writeHostSettingsFile({
+        ...settings,
+        requireViewerApproval: enabled
+      });
+      return { ok: true, requireViewerApproval: enabled };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       return { ok: false, error: reason };
@@ -394,6 +447,104 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.handle("files:start-incoming-transfer", async (_event, payload: { transferId: string; name: string; size: number }) => {
+    try {
+      const transferId = sanitizeTransferId(payload.transferId);
+      if (!transferId) {
+        return { ok: false, error: "Invalid file transfer id" };
+      }
+
+      if (!Number.isInteger(payload.size) || payload.size < 0) {
+        return { ok: false, error: "Invalid file transfer size" };
+      }
+
+      if (incomingFileSaves.has(transferId)) {
+        return { ok: false, error: "File transfer already exists" };
+      }
+
+      const settings = appMode === "host"
+        ? await getHostSettings()
+        : await readAppSettings();
+      const saveDirectory = settings.saveDirectory ?? getDefaultSaveDirectory();
+      await mkdir(saveDirectory, { recursive: true });
+
+      const safeName = sanitizeFileName(payload.name);
+      const filePath = await createUniqueFilePath(saveDirectory, safeName);
+      incomingFileSaves.set(transferId, {
+        expectedChunkIndex: 0,
+        expectedSize: payload.size,
+        filePath,
+        receivedBytes: 0
+      });
+
+      return { ok: true, path: filePath };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: reason };
+    }
+  });
+
+  ipcMain.handle("files:append-incoming-transfer", async (_event, payload: { transferId: string; index: number; bytes: Uint8Array }) => {
+    try {
+      const transferId = sanitizeTransferId(payload.transferId);
+      const transfer = transferId ? incomingFileSaves.get(transferId) : undefined;
+      if (!transferId || !transfer) {
+        return { ok: false, error: "Unknown file transfer" };
+      }
+
+      if (payload.index !== transfer.expectedChunkIndex) {
+        return { ok: false, error: "Out-of-order file chunk" };
+      }
+
+      const bytes = Buffer.from(payload.bytes);
+      if (transfer.receivedBytes + bytes.byteLength > transfer.expectedSize) {
+        incomingFileSaves.delete(transferId);
+        await unlink(transfer.filePath).catch(() => undefined);
+        return { ok: false, error: "File transfer exceeded expected size" };
+      }
+
+      await appendFile(transfer.filePath, bytes);
+      transfer.receivedBytes += bytes.byteLength;
+      transfer.expectedChunkIndex += 1;
+      return { ok: true, receivedBytes: transfer.receivedBytes };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: reason };
+    }
+  });
+
+  ipcMain.handle("files:complete-incoming-transfer", async (_event, transferIdValue: string) => {
+    try {
+      const transferId = sanitizeTransferId(transferIdValue);
+      const transfer = transferId ? incomingFileSaves.get(transferId) : undefined;
+      if (!transferId || !transfer) {
+        return { ok: false, error: "Unknown file transfer" };
+      }
+
+      incomingFileSaves.delete(transferId);
+      if (transfer.receivedBytes !== transfer.expectedSize) {
+        await unlink(transfer.filePath).catch(() => undefined);
+        return { ok: false, error: "File transfer incomplete" };
+      }
+
+      return { ok: true, path: transfer.filePath };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: reason };
+    }
+  });
+
+  ipcMain.handle("files:abort-incoming-transfer", async (_event, transferIdValue: string) => {
+    const transferId = sanitizeTransferId(transferIdValue);
+    const transfer = transferId ? incomingFileSaves.get(transferId) : undefined;
+    if (transferId && transfer) {
+      incomingFileSaves.delete(transferId);
+      await unlink(transfer.filePath).catch(() => undefined);
+    }
+
+    return { ok: true };
+  });
+
   ipcMain.handle("discovery:scan", async () => {
     return await discoverServers();
   });
@@ -414,6 +565,7 @@ function registerIpcHandlers(): void {
       title: "Host Settings",
       backgroundColor: "#0b0d14",
       parent: mainWindow,
+      modal: true,
       webPreferences: {
         preload: join(currentDir, "../preload/index.mjs"),
         contextIsolation: true,
@@ -428,7 +580,7 @@ function registerIpcHandlers(): void {
     });
 
     settingsWindow.webContents.setWindowOpenHandler(({ url }) => {
-      void shell.openExternal(url);
+      openTrustedExternalUrl(url);
       return { action: "deny" };
     });
 
@@ -443,8 +595,45 @@ function registerIpcHandlers(): void {
 }
 
 function sanitizeFileName(name: string): string {
-  const cleaned = basename(name).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
-  return cleaned || "remote-control-file.bin";
+  const fallbackName = "remote-control-file.bin";
+  const normalizedName = name.normalize("NFKC").replace(/\\/g, "/");
+  const hasTraversalSegment = normalizedName
+    .split("/")
+    .some((segment) => segment === "." || segment === "..");
+
+  if (hasTraversalSegment) {
+    return fallbackName;
+  }
+
+  const cleaned = basename(normalizedName)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+
+  if (!cleaned || cleaned === "." || cleaned === ".." || cleaned.includes("..") || isReservedWindowsFileName(cleaned)) {
+    return fallbackName;
+  }
+
+  return cleaned.slice(0, 180);
+}
+
+function sanitizeTransferId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return /^[A-Za-z0-9._-]{1,80}$/.test(normalized) ? normalized : undefined;
+}
+
+function isReservedWindowsFileName(name: string): boolean {
+  const stem = name.split(".")[0]?.toLowerCase();
+  if (!stem) {
+    return true;
+  }
+
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(stem);
 }
 
 function getDefaultSaveDirectory(): string {
@@ -455,6 +644,13 @@ type AppSettings = {
   saveDirectory?: string;
   recentServers?: string[];
   viewer?: ViewerSettings;
+};
+
+type IncomingFileSaveSession = {
+  expectedChunkIndex: number;
+  expectedSize: number;
+  filePath: string;
+  receivedBytes: number;
 };
 
 type ViewerFrameRate = 15 | 30 | 60;
@@ -613,12 +809,31 @@ async function fetchBackend(path: string, init?: RequestInit): Promise<Response>
     throw new Error("Embedded backend is not available");
   }
 
-  const response = await fetch(new URL(path, `${backend.url}/`), init);
+  const headers = new Headers(init?.headers);
+  const settingsToken = getEmbeddedBackendSettingsToken();
+  if (settingsToken) {
+    headers.set("x-remote-control-settings-token", settingsToken);
+  }
+
+  const response = await fetch(new URL(path, `${backend.url}/`), {
+    ...init,
+    headers
+  });
   if (!response.ok) {
     throw new Error(`Embedded backend request failed: ${response.status}`);
   }
 
   return response;
+}
+
+async function hashAccessPassword(password: string): Promise<string> {
+  const salt = randomBytes(passwordSaltBytes);
+  const derivedKey = await scrypt(password, salt, passwordKeyBytes) as Buffer;
+  return [
+    passwordHashPrefix,
+    salt.toString("base64"),
+    derivedKey.toString("base64")
+  ].join("$");
 }
 
 function delay(ms: number): Promise<void> {
@@ -663,7 +878,6 @@ function updateTray(connected: boolean, viewerName?: string): void {
       label: "Quit",
       click: () => {
         isQuitting = true;
-        mainWindow?.destroy();
         app.quit();
       }
     }
@@ -687,6 +901,17 @@ function createTrayIcon() {
   });
 }
 
+function openTrustedExternalUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:" || parsed.protocol === "mailto:") {
+      void shell.openExternal(parsed.toString());
+    }
+  } catch {
+    // Ignore malformed or unsupported external URLs.
+  }
+}
+
 function showHostNotification(title: string, body: string): void {
   if (appMode !== "host" || !Notification.isSupported()) {
     return;
@@ -697,6 +922,24 @@ function showHostNotification(title: string, body: string): void {
     body,
     silent: false
   }).show();
+}
+
+function shouldDelayQuitForHostShutdown(): boolean {
+  return appMode === "host"
+    && !hostShutdownNotificationSent
+    && Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed());
+}
+
+function notifyHostShutdownAndQuit(): void {
+  hostShutdownNotificationSent = true;
+  isQuitting = true;
+  mainWindow?.webContents.send("app:host-shutdown-requested");
+
+  const timer = setTimeout(() => {
+    stopEmbeddedBackend();
+    app.quit();
+  }, hostShutdownGracePeriodMs);
+  timer.unref?.();
 }
 
 async function createUniqueFilePath(directory: string, fileName: string): Promise<string> {

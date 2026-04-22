@@ -1,5 +1,23 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type RefObject } from "react";
-import type { ControlMessage, DiscoveredServer, HostSource, PeerJoinedPayload, PeerRole } from "@remote-control/shared";
+import {
+  Component,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ErrorInfo,
+  type ReactElement,
+  type ReactNode,
+  type RefObject
+} from "react";
+import type {
+  ControlMessage,
+  DiscoveredServer,
+  HostSource,
+  PeerJoinedPayload,
+  PeerRole,
+  ViewerApprovalRequestPayload
+} from "@remote-control/shared";
 
 import type { DesktopCaptureSource, EmbeddedBackendStatus, ViewerSettings } from "./env";
 import {
@@ -17,6 +35,9 @@ const fixedRole: PeerRole | undefined = appMode === "combined" ? undefined : app
 const viewerOverlayButtonSize = 38;
 const viewerOverlayMargin = 8;
 const viewerOverlayGap = 8;
+const viewerPanelSafeMargin = 14;
+const viewerSettingsPanelWidth = 360;
+const viewerHotkeysPanelWidth = 340;
 
 type ViewerOverlayPosition = {
   top: number;
@@ -33,10 +54,53 @@ type ViewerOverlayDragState = {
 };
 
 export function App(): ReactElement {
-  if (isSettingsPage) {
-    return <HostSettingsPage />;
+  return (
+    <AppErrorBoundary>
+      {isSettingsPage ? <HostSettingsPage /> : <RemoteControlApp />}
+    </AppErrorBoundary>
+  );
+}
+
+type AppErrorBoundaryProps = {
+  children: ReactNode;
+};
+
+type AppErrorBoundaryState = {
+  error?: Error;
+};
+
+class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
+  state: AppErrorBoundaryState = {};
+
+  static getDerivedStateFromError(error: Error): AppErrorBoundaryState {
+    return { error };
   }
 
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("Renderer crashed", error, info.componentStack);
+  }
+
+  render(): ReactNode {
+    if (!this.state.error) {
+      return this.props.children;
+    }
+
+    return (
+      <div className="error-boundary">
+        <div className="error-card">
+          <div className="section-label">Renderer Error</div>
+          <h1>Something went wrong</h1>
+          <p>{this.state.error.message || "The UI hit an unexpected error."}</p>
+          <button type="button" className="connect-btn btn-danger" onClick={() => window.location.reload()}>
+            Reload UI
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+function RemoteControlApp(): ReactElement {
   const [role, setRole] = useState<PeerRole>(fixedRole ?? "host");
   const [serverUrl, setServerUrl] = useState(defaultServerUrl);
   const [sessionId] = useState(defaultSessionId);
@@ -60,7 +124,9 @@ export function App(): ReactElement {
   const [hostSources, setHostSources] = useState<HostSource[]>([]);
   const [activeRemoteSourceId, setActiveRemoteSourceId] = useState<string | undefined>();
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
+  const [serverLatencies, setServerLatencies] = useState<Map<string, number>>(new Map());
   const [isDiscovering, setIsDiscovering] = useState(false);
+  const [isHotkeysOpen, setIsHotkeysOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState<EmbeddedBackendStatus>({ status: "disabled" });
   const [captureMode, setCaptureMode] = useState<CaptureMode>("desktop");
   const [frameRate, setFrameRate] = useState<FrameRate>(30);
@@ -76,6 +142,7 @@ export function App(): ReactElement {
   const [receiveStreamAudio, setReceiveStreamAudio] = useState(true);
   const [switchMonitorShortcut, setSwitchMonitorShortcut] = useState("Ctrl+Alt+Shift+M");
   const [passwordPrompt, setPasswordPrompt] = useState<{ message: string; password: string } | undefined>();
+  const [viewerApprovalPrompt, setViewerApprovalPrompt] = useState<ViewerApprovalRequestPayload | undefined>();
 
   const clientRef = useRef<RemoteControlClient | undefined>(undefined);
   const hostAutoConnectStartedRef = useRef(false);
@@ -83,6 +150,7 @@ export function App(): ReactElement {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const passwordPromptResolverRef = useRef<((password?: string) => void) | undefined>(undefined);
+  const viewerApprovalResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
 
   const selectedSource = useMemo(
     () => sources.find((source) => source.id === selectedSourceId),
@@ -184,6 +252,17 @@ export function App(): ReactElement {
       return;
     }
 
+    return window.remoteControl.onHostShutdownRequested(() => {
+      setStatus("Host is shutting down");
+      clientRef.current?.announceHostShutdown("Host is shutting down");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (appMode !== "host") {
+      return;
+    }
+
     void window.remoteControl.updateHostPresence({
       connected: Boolean(peer),
       viewerName: peer?.displayName
@@ -202,6 +281,18 @@ export function App(): ReactElement {
         return;
       }
 
+      if (event.key === "Escape" && isHotkeysOpen) {
+        event.preventDefault();
+        setIsHotkeysOpen(false);
+        return;
+      }
+
+      if (event.key === "?" && !isEditableTarget(event.target) && isConnected) {
+        event.preventDefault();
+        setIsHotkeysOpen((v) => !v);
+        return;
+      }
+
       if (event.key === "F11") {
         event.preventDefault();
         void toggleFullscreen();
@@ -215,7 +306,7 @@ export function App(): ReactElement {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [appMode, isFullscreen, isViewerSettingsOpen]);
+  }, [appMode, isConnected, isFullscreen, isHotkeysOpen, isViewerSettingsOpen]);
 
   useEffect(() => {
     if (appMode === "host" || role !== "viewer" || !isConnected) {
@@ -282,6 +373,7 @@ export function App(): ReactElement {
         }
       },
       onPasswordRequired: requestServerPassword,
+      onViewerApprovalRequest: requestViewerApproval,
       onStats: setConnectionStats,
       onFileReceived: (file) => {
         setReceivedFileNotice(file);
@@ -324,6 +416,9 @@ export function App(): ReactElement {
     setHostSources([]);
     setActiveRemoteSourceId(undefined);
     setPeer(undefined);
+    viewerApprovalResolverRef.current?.(false);
+    viewerApprovalResolverRef.current = undefined;
+    setViewerApprovalPrompt(undefined);
     setReceivedFileNotice(undefined);
     setIsViewerSettingsOpen(false);
     setStatus("Disconnected");
@@ -370,21 +465,29 @@ export function App(): ReactElement {
   function handleFileInputChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const file = event.target.files?.[0];
     if (file) {
+      if (file.size > 50 * 1024 * 1024 && !window.confirm(`Send "${file.name}" (${formatFileSize(file.size)}) to the remote host?`)) {
+        event.target.value = "";
+        return;
+      }
       void sendSelectedFile(file);
     }
     event.target.value = "";
   }
 
-  function handleViewerFileDragOver(event: React.DragEvent<HTMLElement>): void {
+  function handleFileDragOver(event: React.DragEvent<HTMLElement>): void {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+
     event.preventDefault();
-    if (!isConnected) {
+    if (!isConnected || !peer) {
       return;
     }
 
     setIsDraggingFile(true);
   }
 
-  function handleViewerFileDragLeave(event: React.DragEvent<HTMLElement>): void {
+  function handleFileDragLeave(event: React.DragEvent<HTMLElement>): void {
     event.preventDefault();
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
@@ -394,16 +497,23 @@ export function App(): ReactElement {
     setIsDraggingFile(false);
   }
 
-  function handleViewerFileDrop(event: React.DragEvent<HTMLElement>): void {
+  function handleFileDrop(event: React.DragEvent<HTMLElement>): void {
+    if (!hasDraggedFiles(event.dataTransfer)) {
+      return;
+    }
+
     event.preventDefault();
     setIsDraggingFile(false);
 
-    if (!isConnected) {
+    if (!isConnected || !peer) {
       return;
     }
 
     const file = event.dataTransfer.files?.[0];
     if (file) {
+      if (file.size > 50 * 1024 * 1024 && !window.confirm(`Send "${file.name}" (${formatFileSize(file.size)}) to the remote host?`)) {
+        return;
+      }
       void sendSelectedFile(file);
     }
   }
@@ -538,7 +648,7 @@ export function App(): ReactElement {
     }
 
     setHostAccessPassword(result.accessPassword ?? "");
-    setStatus(result.accessPassword ? "Server password updated" : "Server password cleared");
+    setStatus(result.accessPasswordSet ? "Server password updated" : "Server password cleared");
   }
 
   function requestServerPassword(message: string): Promise<string | undefined> {
@@ -556,6 +666,25 @@ export function App(): ReactElement {
       setIsConnected(false);
       void leaveFullscreen();
     }
+  }
+
+  function requestViewerApproval(request: ViewerApprovalRequestPayload): Promise<boolean> {
+    if (appMode !== "host" || viewerApprovalResolverRef.current) {
+      return Promise.resolve(false);
+    }
+
+    setViewerApprovalPrompt(request);
+    setStatus(`${request.displayName ?? "Viewer"} is requesting access`);
+    return new Promise((resolve) => {
+      viewerApprovalResolverRef.current = resolve;
+    });
+  }
+
+  function resolveViewerApproval(approved: boolean): void {
+    viewerApprovalResolverRef.current?.(approved);
+    viewerApprovalResolverRef.current = undefined;
+    setViewerApprovalPrompt(undefined);
+    setStatus(approved ? "Viewer approved" : "Viewer rejected");
   }
 
   function saveViewerSettings(settings: Partial<ViewerSettings>): void {
@@ -687,10 +816,28 @@ export function App(): ReactElement {
       }
 
       setStatus(servers.length > 0 ? `Found ${servers.length} server${servers.length === 1 ? "" : "s"} on LAN` : "No LAN servers found");
+
+      const latencies = new Map<string, number>();
+      await Promise.all(servers.map(async (server) => {
+        try {
+          const start = performance.now();
+          await fetch(`${server.url}/stats`, { signal: AbortSignal.timeout(2000) });
+          latencies.set(server.url, Math.round(performance.now() - start));
+        } catch {
+          // unreachable or timed out — no latency shown
+        }
+      }));
+      setServerLatencies(latencies);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setIsDiscovering(false);
+    }
+  }
+
+  function confirmAndDisconnect(): void {
+    if (window.confirm("Disconnect from the remote host?")) {
+      disconnect();
     }
   }
 
@@ -705,7 +852,20 @@ export function App(): ReactElement {
   const canConnect = Boolean(serverUrl.trim() && sessionId.trim() && (role === "viewer" || selectedSourceId));
 
   return (
-    <div className={appShellClassName}>
+    <div
+      className={appShellClassName}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
+    >
+      {role === "host" && isDraggingFile && isConnected && peer && (
+        <div className="global-file-drop-overlay" aria-hidden="true">
+          <div className="global-file-drop-card">
+            <div className="video-drop-title">Drop file to transfer</div>
+            <div className="video-drop-sub">Release to send it to the connected viewer</div>
+          </div>
+        </div>
+      )}
       {receivedFileNotice && (
         <div className="file-toast" role="status" aria-live="polite">
           <div className="file-toast-body">
@@ -768,6 +928,39 @@ export function App(): ReactElement {
               </div>
             </div>
           </form>
+        </div>
+      )}
+      {viewerApprovalPrompt && (
+        <div className="password-prompt-overlay">
+          <div className="password-prompt-modal" role="dialog" aria-label="Viewer approval request">
+            <div className="password-prompt-header">
+              <div>
+                <div className="section-label">Connection Request</div>
+                <h2>Allow Viewer?</h2>
+              </div>
+            </div>
+            <div className="password-prompt-body">
+              <div className="approval-request-card">
+                <div className="approval-request-name">
+                  {viewerApprovalPrompt.displayName ?? "Viewer"}
+                </div>
+                <div className="approval-request-meta">
+                  Session {viewerApprovalPrompt.sessionId}
+                </div>
+              </div>
+              <div className="drop-hint">
+                A client is asking to view and control this host. Approve only if you recognize this request.
+              </div>
+              <div className="password-prompt-actions">
+                <button type="button" className="secondary-action" onClick={() => resolveViewerApproval(false)}>
+                  Deny
+                </button>
+                <button type="button" className="connect-btn btn-primary" onClick={() => resolveViewerApproval(true)}>
+                  Allow
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
       <aside className="sidebar">
@@ -1004,6 +1197,9 @@ export function App(): ReactElement {
                       >
                         <span className="server-name">{server.name}</span>
                         <span className="server-url">{server.url}</span>
+                        {serverLatencies.has(server.url) && (
+                          <span className="server-ping">{serverLatencies.get(server.url)} ms</span>
+                        )}
                       </button>
                     ))
                   )}
@@ -1034,7 +1230,7 @@ export function App(): ReactElement {
         {appMode !== "host" && (
         <div className="sidebar-footer">
           {isConnected ? (
-            <button type="button" className="connect-btn btn-danger" onClick={disconnect}>
+            <button type="button" className="connect-btn btn-danger" onClick={confirmAndDisconnect}>
               Disconnect
             </button>
           ) : (
@@ -1054,9 +1250,6 @@ export function App(): ReactElement {
       {appMode !== "host" && (!isViewerMode || isConnected) && (
         <section
           className={`video-stage${role === "viewer" && isDraggingFile ? " drag-active" : ""}`}
-          onDragOver={role === "viewer" ? handleViewerFileDragOver : undefined}
-          onDragLeave={role === "viewer" ? handleViewerFileDragLeave : undefined}
-          onDrop={role === "viewer" ? handleViewerFileDrop : undefined}
         >
           <div className="video-overlay-header">
             <div>
@@ -1124,6 +1317,7 @@ export function App(): ReactElement {
                 frameRate={viewerFrameRate}
                 hostSources={hostSources}
                 isFullscreen={isFullscreen}
+                isHotkeysOpen={isHotkeysOpen}
                 isOpen={isViewerSettingsOpen}
                 receiveAudio={receiveStreamAudio}
                 saveDirectory={saveDirectory}
@@ -1133,7 +1327,7 @@ export function App(): ReactElement {
                 transferProgress={transferProgress}
                 onChooseSaveDirectory={() => void chooseSaveDirectory()}
                 onClose={() => setIsViewerSettingsOpen(false)}
-                onDisconnect={disconnect}
+                onDisconnect={confirmAndDisconnect}
                 onFileInputChange={handleFileInputChange}
                 onSelectFile={() => fileInputRef.current?.click()}
                 onToggleConnectInFullscreen={changeConnectInFullscreen}
@@ -1147,6 +1341,13 @@ export function App(): ReactElement {
                 onChangeSwitchMonitorShortcut={changeSwitchMonitorShortcut}
                 onToggleReceiveAudio={changeReceiveStreamAudio}
               />
+              {isHotkeysOpen && (
+                <HotkeysPanel
+                  disconnectShortcut={disconnectShortcut}
+                  switchMonitorShortcut={switchMonitorShortcut}
+                  onClose={() => setIsHotkeysOpen(false)}
+                />
+              )}
             </>
           ) : (
             <VideoEmpty
@@ -1242,6 +1443,7 @@ function ViewerSettingsOverlay({
   frameRate,
   hostSources,
   isFullscreen,
+  isHotkeysOpen,
   isOpen,
   receiveAudio,
   saveDirectory,
@@ -1275,6 +1477,7 @@ function ViewerSettingsOverlay({
   frameRate: FrameRate;
   hostSources: HostSource[];
   isFullscreen: boolean;
+  isHotkeysOpen: boolean;
   isOpen: boolean;
   receiveAudio: boolean;
   saveDirectory: string;
@@ -1299,8 +1502,10 @@ function ViewerSettingsOverlay({
   onToggleReceiveAudio: (enabled: boolean) => void;
 }): ReactElement {
   const [position, setPosition] = useState<ViewerOverlayPosition>({ top: 14, right: 14 });
+  const [isHotkeysHintOpen, setIsHotkeysHintOpen] = useState(false);
   const dragRef = useRef<ViewerOverlayDragState | undefined>(undefined);
   const skipNextClickRef = useRef(false);
+  const showHotkeysHint = isHotkeysHintOpen && !isHotkeysOpen && !isOpen;
 
   useEffect(() => {
     const handleResize = (): void => {
@@ -1324,6 +1529,7 @@ function ViewerSettingsOverlay({
       startX: event.clientX,
       startY: event.clientY
     };
+    setIsHotkeysHintOpen(false);
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
@@ -1337,6 +1543,7 @@ function ViewerSettingsOverlay({
     const deltaY = event.clientY - drag.startY;
     if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
       drag.moved = true;
+      setIsHotkeysHintOpen(false);
     }
 
     if (!drag.moved) {
@@ -1377,6 +1584,7 @@ function ViewerSettingsOverlay({
     }
 
     onToggle();
+    setIsHotkeysHintOpen(false);
   }
 
   return (
@@ -1390,11 +1598,23 @@ function ViewerSettingsOverlay({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onMouseEnter={() => setIsHotkeysHintOpen(true)}
+        onMouseLeave={() => setIsHotkeysHintOpen(false)}
+        onFocus={() => setIsHotkeysHintOpen(true)}
+        onBlur={() => setIsHotkeysHintOpen(false)}
         aria-label="Open viewer settings"
-        title="Settings"
       >
         RC
       </button>
+
+      {showHotkeysHint && (
+        <HotkeysPanel
+          disconnectShortcut={disconnectShortcut}
+          switchMonitorShortcut={switchMonitorShortcut}
+          variant="popover"
+          style={getViewerHotkeysPanelStyle(position)}
+        />
+      )}
 
       {isOpen && (
         <div
@@ -1594,6 +1814,7 @@ function clampViewerOverlayPosition(position: ViewerOverlayPosition): ViewerOver
 }
 
 function getViewerSettingsPanelStyle(position: ViewerOverlayPosition): CSSProperties {
+  const right = getViewerPanelRight(position, viewerSettingsPanelWidth);
   const belowTop = position.top + viewerOverlayButtonSize + viewerOverlayGap;
   const availableBelow = window.innerHeight - belowTop - viewerOverlayMargin;
   const availableAbove = position.top - viewerOverlayGap - viewerOverlayMargin;
@@ -1601,16 +1822,42 @@ function getViewerSettingsPanelStyle(position: ViewerOverlayPosition): CSSProper
   if (availableBelow >= 320 || availableBelow >= availableAbove) {
     return {
       top: belowTop,
-      right: position.right,
+      right,
       maxHeight: `calc(100vh - ${belowTop + viewerOverlayMargin}px)`
     };
   }
 
   return {
     bottom: window.innerHeight - position.top + viewerOverlayGap,
-    right: position.right,
+    right,
     maxHeight: Math.max(180, availableAbove)
   };
+}
+
+function getViewerHotkeysPanelStyle(position: ViewerOverlayPosition): CSSProperties {
+  const right = getViewerPanelRight(position, viewerHotkeysPanelWidth);
+  const belowTop = position.top + viewerOverlayButtonSize + viewerOverlayGap;
+  const availableBelow = window.innerHeight - belowTop - viewerOverlayMargin;
+  const availableAbove = position.top - viewerOverlayGap - viewerOverlayMargin;
+
+  if (availableBelow >= 180 || availableBelow >= availableAbove) {
+    return {
+      top: belowTop,
+      right
+    };
+  }
+
+  return {
+    bottom: window.innerHeight - position.top + viewerOverlayGap,
+    right
+  };
+}
+
+function getViewerPanelRight(position: ViewerOverlayPosition, preferredWidth: number): number {
+  const availableWidth = Math.max(0, window.innerWidth - viewerPanelSafeMargin * 2);
+  const panelWidth = Math.min(preferredWidth, availableWidth);
+  const maxRight = Math.max(viewerPanelSafeMargin, window.innerWidth - panelWidth - viewerPanelSafeMargin);
+  return clamp(position.right, viewerPanelSafeMargin, maxRight);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1942,6 +2189,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes("Files");
+}
+
 function getDefaultCaptureSource(sources: DesktopCaptureSource[]): DesktopCaptureSource | undefined {
   return sources.find((source) => {
     const name = source.name.toLowerCase();
@@ -1973,16 +2224,76 @@ function extractServerLabel(url: string): string {
   }
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+function HotkeysPanel({
+  disconnectShortcut,
+  switchMonitorShortcut,
+  onClose,
+  style,
+  variant = "dialog"
+}: {
+  disconnectShortcut: string;
+  switchMonitorShortcut: string;
+  onClose?: () => void;
+  style?: CSSProperties;
+  variant?: "dialog" | "popover";
+}): ReactElement {
+  const rows: [string, string][] = [
+    [disconnectShortcut, "Disconnect"],
+    [switchMonitorShortcut, "Switch monitor"],
+    ["Ctrl+Alt+Shift+Esc", "Exit input capture"],
+    ["F11", "Toggle fullscreen"],
+    ["?", "Show / hide shortcuts"],
+  ];
+
+  return (
+    <div
+      className={`hotkeys-panel${variant === "popover" ? " hotkeys-panel-popover" : ""}`}
+      role={variant === "popover" ? "tooltip" : "dialog"}
+      aria-label="Keyboard shortcuts"
+      style={style}
+    >
+      <div className="hotkeys-header">
+        <span className="section-label" style={{ margin: 0 }}>Keyboard Shortcuts</span>
+        {onClose && (
+          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">X</button>
+        )}
+      </div>
+      <div className="hotkeys-body">
+        {rows.map(([keys, label]) => (
+          <div key={label} className="hotkeys-row">
+            <kbd className="hotkeys-kbd">{keys}</kbd>
+            <span className="hotkeys-label">{label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function HostSettingsPage(): ReactElement {
   const [saveDirectory, setSaveDirectory] = useState("");
   const [launchOnStartup, setLaunchOnStartup] = useState(false);
+  const [requireViewerApproval, setRequireViewerApproval] = useState(true);
   const [hostAccessPassword, setHostAccessPassword] = useState("");
+  const [hostAccessPasswordSet, setHostAccessPasswordSet] = useState(false);
+  const [hostAccessPasswordDirty, setHostAccessPasswordDirty] = useState(false);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
     void window.remoteControl.getFileSettings().then((s) => setSaveDirectory(s.saveDirectory));
     void window.remoteControl.getLaunchSettings().then((s) => setLaunchOnStartup(s.launchOnStartup));
-    void window.remoteControl.getHostAccessSettings().then((s) => setHostAccessPassword(s.accessPassword));
+    void window.remoteControl.getHostAccessSettings().then((s) => {
+      setHostAccessPassword(s.accessPassword);
+      setHostAccessPasswordSet(s.accessPasswordSet);
+      setRequireViewerApproval(s.requireViewerApproval);
+      setHostAccessPasswordDirty(false);
+    });
   }, []);
 
   async function chooseSaveDirectory(): Promise<void> {
@@ -2004,7 +2315,25 @@ function HostSettingsPage(): ReactElement {
     const result = await window.remoteControl.setHostAccessPassword(password);
     if (result.ok) {
       setHostAccessPassword(result.accessPassword ?? "");
+      setHostAccessPasswordSet(Boolean(result.accessPasswordSet));
+      setHostAccessPasswordDirty(false);
+      setStatus(result.accessPasswordSet ? "Server password updated" : "Server password cleared");
     } else if (result.error) {
+      setStatus(result.error);
+    }
+  }
+
+  async function changeRequireViewerApproval(enabled: boolean): Promise<void> {
+    setRequireViewerApproval(enabled);
+    const result = await window.remoteControl.setRequireViewerApproval(enabled);
+    if (result.ok) {
+      setRequireViewerApproval(result.requireViewerApproval ?? enabled);
+      setStatus(enabled ? "Viewer approval required" : "Viewer approval disabled");
+      return;
+    }
+
+    setRequireViewerApproval(!enabled);
+    if (result.error) {
       setStatus(result.error);
     }
   }
@@ -2039,17 +2368,43 @@ function HostSettingsPage(): ReactElement {
           </span>
         </label>
 
+        <label className="toggle-field compact-toggle">
+          <input
+            type="checkbox"
+            checked={requireViewerApproval}
+            onChange={(event) => void changeRequireViewerApproval(event.target.checked)}
+          />
+          <span>
+            <strong>Require viewer approval</strong>
+            <small>Ask on this host before allowing a client to connect</small>
+          </span>
+        </label>
+
         <div className="field">
           <label>Server Password</label>
           <input
             type="password"
             value={hostAccessPassword}
-            onChange={(event) => setHostAccessPassword(event.target.value)}
-            onBlur={() => void changeHostAccessPassword(hostAccessPassword)}
-            placeholder="No password"
+            onChange={(event) => {
+              setHostAccessPassword(event.target.value);
+              setHostAccessPasswordDirty(true);
+            }}
+            onBlur={() => {
+              if (hostAccessPasswordDirty) {
+                void changeHostAccessPassword(hostAccessPassword);
+              }
+            }}
+            placeholder={hostAccessPasswordSet ? "Password is set" : "No password"}
           />
+          {hostAccessPasswordSet && (
+            <button type="button" className="secondary-action" onClick={() => void changeHostAccessPassword("")}>
+              Clear Password
+            </button>
+          )}
           <div className="drop-hint">
-            Viewers will be asked for this password before joining.
+            {hostAccessPasswordSet
+              ? "A password is configured. Enter a new password to replace it."
+              : "Viewers will be asked for this password before joining."}
           </div>
         </div>
       </div>
