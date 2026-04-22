@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { clipboard, contextBridge, ipcRenderer } from "electron";
 import type { ControlMessage } from "@remote-control/shared";
 
 declare const __REMOTE_CONTROL_APP_MODE__: "combined" | "host" | "viewer";
@@ -11,7 +11,13 @@ contextBridge.exposeInMainWorld("remoteControl", {
   getBackendStatus: () => ipcRenderer.invoke("backend:status"),
   discoverServers: () => ipcRenderer.invoke("discovery:scan"),
   getDesktopSources: () => ipcRenderer.invoke("desktop:get-sources"),
-  applyControlMessage: (message: ControlMessage) => ipcRenderer.invoke("control:message", message)
+  applyControlMessage: (message: ControlMessage) => ipcRenderer.invoke("control:message", message),
+  getFileSettings: () => ipcRenderer.invoke("files:get-settings"),
+  chooseSaveDirectory: () => ipcRenderer.invoke("files:choose-directory"),
+  openSaveDirectory: (path?: string) => ipcRenderer.invoke("files:open-folder", path),
+  saveIncomingFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke("files:save", { name, bytes }),
+  readClipboardText: () => clipboard.readText(),
+  writeClipboardText: (text: string) => clipboard.writeText(text)
 });
 
 function normalizeAppMode(value: string): "combined" | "host" | "viewer" {

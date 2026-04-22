@@ -52,6 +52,61 @@ h1, h2, h3 {
   width: 100vw;
 }
 
+.file-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  width: min(360px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(62, 207, 126, 0.35);
+  border-radius: 8px;
+  background: rgba(17, 19, 29, 0.96);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.file-toast-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-toast-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--success);
+}
+
+.file-toast-text,
+.file-toast-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-toast-text {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.file-toast-path {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.file-toast-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.file-toast-actions button {
+  flex: 1;
+}
+
 .app-shell.host-mode {
   grid-template-columns: 1fr;
 }
@@ -393,6 +448,139 @@ select:disabled {
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+.stats-card {
+  margin: 2px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.stats-card-title {
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.stats-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stats-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.stats-item strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.file-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.file-dropzone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.file-dropzone.disabled {
+  opacity: 0.55;
+}
+
+.file-dropzone-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.file-dropzone-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.transfer-status {
+  margin-top: 8px;
+}
+
+.inline-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.secondary-action {
+  width: 100%;
+}
+
+.path-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.transfer-name,
+.transfer-percent {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.transfer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.transfer-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
 }
 
 select {

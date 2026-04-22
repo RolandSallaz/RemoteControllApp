@@ -24,21 +24,28 @@ const copiedFiles = [];
 
 for (const source of releaseSources) {
   const entries = await readdir(source.dir, { withFileTypes: true });
-  const executables = entries.filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".exe");
+  const assets = entries.filter((entry) => {
+    if (!entry.isFile()) {
+      return false;
+    }
 
-  if (executables.length === 0) {
-    throw new Error(`No .exe files found in ${source.dir}`);
+    const name = entry.name.toLowerCase();
+    return name.endsWith(".exe") || name.endsWith(".yml") || name.endsWith(".blockmap");
+  });
+
+  if (assets.length === 0) {
+    throw new Error(`No release assets found in ${source.dir}`);
   }
 
-  for (const executable of executables) {
-    const sourcePath = join(source.dir, executable.name);
-    const targetPath = join(artifactsRoot, executable.name);
+  for (const asset of assets) {
+    const sourcePath = join(source.dir, asset.name);
+    const targetPath = join(artifactsRoot, asset.name);
     await cp(sourcePath, targetPath);
 
     const content = await readFile(targetPath);
     copiedFiles.push({
       channel: source.name,
-      file: executable.name,
+      file: asset.name,
       size: content.byteLength,
       sha256: createHash("sha256").update(content).digest("hex")
     });

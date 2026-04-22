@@ -1,7 +1,11 @@
 import type {
   ClientToServerEvents,
+  ClipboardSyncMessage,
   ControlMessage,
   DataChannelMessage,
+  FileTransferChunkMessage,
+  FileTransferCompleteMessage,
+  FileTransferStartMessage,
   HostSource,
   PeerJoinedPayload,
   PeerRole,
@@ -17,6 +21,22 @@ type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 export type CaptureMode = "desktop" | "game";
 export type FrameRate = 15 | 30 | 60;
 
+export type ConnectionStats = {
+  latencyMs?: number;
+  videoBitrateKbps?: number;
+  audioBitrateKbps?: number;
+  packetsLost?: number;
+  packetLossPercent?: number;
+};
+
+type IncomingFileTransfer = {
+  name: string;
+  size: number;
+  mimeType: string;
+  chunks: Uint8Array[];
+  receivedBytes: number;
+};
+
 export type RemoteControlClientOptions = {
   role: PeerRole;
   sessionId: string;
@@ -28,6 +48,8 @@ export type RemoteControlClientOptions = {
   onStatus: (status: string) => void;
   onPeer: (peer: PeerJoinedPayload | undefined) => void;
   onHostSources?: (sources: HostSource[], activeSourceId?: string) => void;
+  onStats?: (stats: ConnectionStats | undefined) => void;
+  onFileReceived?: (file: { name: string; path?: string }) => void;
   onLocalStream: (stream: MediaStream | undefined) => void;
   onRemoteStream: (stream: MediaStream | undefined) => void;
 };
@@ -38,10 +60,24 @@ export class RemoteControlClient {
   private localStream?: MediaStream;
   private controlChannel?: RTCDataChannel;
   private videoTransceiver?: RTCRtpTransceiver;
+  private audioTransceiver?: RTCRtpTransceiver;
   private peerClientId?: string;
   private currentCaptureSourceId?: string;
   private iceServers: TurnCredentials[] = [{ urls: ["stun:stun.l.google.com:19302"] }];
   private readonly pendingCandidates: RTCIceCandidateInit[] = [];
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private statsTimer?: ReturnType<typeof setInterval>;
+  private clipboardTimer?: ReturnType<typeof setInterval>;
+  private clipboardSnapshot = "";
+  private remoteClipboardText?: string;
+  private previousStatsSample?: {
+    timestamp: number;
+    videoBytes: number;
+    audioBytes: number;
+    packetsLost: number;
+    packetsReceived: number;
+  };
+  private readonly incomingTransfers = new Map<string, IncomingFileTransfer>();
 
   constructor(private readonly options: RemoteControlClientOptions) {
     this.currentCaptureSourceId = options.captureSourceId;
@@ -62,6 +98,9 @@ export class RemoteControlClient {
   }
 
   disconnect(): void {
+    this.stopReconnectTimer();
+    this.stopStatsPolling();
+    this.stopClipboardSync();
     this.controlChannel?.close();
     this.peerConnection?.close();
     this.socket?.disconnect();
@@ -69,12 +108,16 @@ export class RemoteControlClient {
 
     this.controlChannel = undefined;
     this.peerConnection = undefined;
+    this.videoTransceiver = undefined;
+    this.audioTransceiver = undefined;
     this.socket = undefined;
     this.localStream = undefined;
     this.peerClientId = undefined;
     this.pendingCandidates.length = 0;
+    this.previousStatsSample = undefined;
     this.options.onPeer(undefined);
     this.options.onHostSources?.([], undefined);
+    this.options.onStats?.(undefined);
     this.options.onLocalStream(undefined);
     this.options.onRemoteStream(undefined);
     this.options.onStatus("Disconnected");
@@ -114,6 +157,51 @@ export class RemoteControlClient {
     this.controlChannel.send(JSON.stringify(message));
   }
 
+  async sendFile(file: File, onProgress?: (progress: number) => void): Promise<void> {
+    if (this.controlChannel?.readyState !== "open") {
+      throw new Error("Control channel is not ready yet");
+    }
+
+    const transferId = createTransferId();
+    const startMessage: FileTransferStartMessage = {
+      kind: "file-transfer-start",
+      transferId,
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      size: file.size
+    };
+
+    this.controlChannel.send(JSON.stringify(startMessage));
+
+    const chunkSize = 48 * 1024;
+    let offset = 0;
+    let index = 0;
+
+    while (offset < file.size) {
+      const chunk = file.slice(offset, offset + chunkSize);
+      const bytes = new Uint8Array(await chunk.arrayBuffer());
+      const chunkMessage: FileTransferChunkMessage = {
+        kind: "file-transfer-chunk",
+        transferId,
+        index,
+        data: bytesToBase64(bytes)
+      };
+
+      this.controlChannel.send(JSON.stringify(chunkMessage));
+      offset += chunk.size;
+      index += 1;
+      onProgress?.(Math.min(100, Math.round((offset / file.size) * 100)));
+      await waitForChannelDrain(this.controlChannel);
+    }
+
+    const completeMessage: FileTransferCompleteMessage = {
+      kind: "file-transfer-complete",
+      transferId
+    };
+
+    this.controlChannel.send(JSON.stringify(completeMessage));
+  }
+
   private registerSocketHandlers(socket: ClientSocket): void {
     socket.on("connect", () => {
       this.options.onStatus(`Connected as ${this.options.role}`);
@@ -132,6 +220,7 @@ export class RemoteControlClient {
 
     socket.on("disconnect", () => {
       this.options.onStatus("Signaling disconnected");
+      this.scheduleReconnect();
     });
 
     socket.on("connect_error", (error) => {
@@ -158,7 +247,10 @@ export class RemoteControlClient {
     socket.on("session:left", (payload) => {
       if (payload.clientId === this.peerClientId) {
         this.peerClientId = undefined;
+        this.resetPeerConnection();
         this.options.onPeer(undefined);
+        this.options.onRemoteStream(undefined);
+        this.options.onStats?.(undefined);
         this.options.onStatus("Peer left the session");
       }
     });
@@ -185,7 +277,12 @@ export class RemoteControlClient {
 
     const frameRate = this.options.frameRate ?? 30;
     const constraints = {
-      audio: false,
+      audio: {
+        mandatory: {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: this.currentCaptureSourceId
+        }
+      },
       video: {
         mandatory: {
           chromeMediaSource: "desktop",
@@ -199,6 +296,7 @@ export class RemoteControlClient {
     const previousStream = this.localStream;
     const nextStream = await navigator.mediaDevices.getUserMedia(constraints);
     const nextVideoTrack = nextStream.getVideoTracks()[0];
+    const nextAudioTrack = nextStream.getAudioTracks()[0];
 
     if (!nextVideoTrack) {
       nextStream.getTracks().forEach((track) => track.stop());
@@ -216,6 +314,20 @@ export class RemoteControlClient {
         streams: [nextStream]
       });
       this.setCodecPreferences(this.videoTransceiver);
+    }
+
+    const audioSender = peerConnection.getSenders().find((candidate) => candidate.track?.kind === "audio");
+    if (nextAudioTrack) {
+      if (audioSender) {
+        await audioSender.replaceTrack(nextAudioTrack);
+      } else {
+        this.audioTransceiver = peerConnection.addTransceiver(nextAudioTrack, {
+          direction: "sendonly",
+          streams: [nextStream]
+        });
+      }
+    } else if (audioSender) {
+      await audioSender.replaceTrack(null);
     }
 
     previousStream?.getTracks().forEach((track) => track.stop());
@@ -254,6 +366,15 @@ export class RemoteControlClient {
       if (peerConnection.connectionState === "connected" && this.options.role === "host") {
         void this.applyVideoEncoderParams();
       }
+
+       if (peerConnection.connectionState === "connected") {
+        this.stopReconnectTimer();
+        this.startStatsPolling();
+      }
+
+      if (peerConnection.connectionState === "failed" || peerConnection.connectionState === "disconnected") {
+        this.scheduleReconnect();
+      }
     };
 
     if (this.options.role === "host") {
@@ -273,35 +394,56 @@ export class RemoteControlClient {
   private bindControlChannel(channel: RTCDataChannel): void {
     channel.onopen = () => {
       this.options.onStatus("Control channel ready");
+      this.startClipboardSync();
       if (this.options.role === "host") {
         void this.publishHostState();
       }
     };
 
     channel.onclose = () => {
+      this.stopClipboardSync();
       this.options.onStatus("Control channel closed");
     };
 
     channel.onmessage = (event) => {
-      if (this.options.role !== "host") {
-        const parsed = parseDataChannelMessage(event.data);
-        if (parsed?.kind === "host-state") {
-          this.options.onHostSources?.(parsed.sources, parsed.activeSourceId);
-        }
-        return;
-      }
-
       const parsed = parseDataChannelMessage(event.data);
       if (!parsed) {
         return;
       }
 
-      if (parsed.kind === "host-command") {
-        void this.handleHostCommand(parsed);
+      if (parsed.kind === "host-state") {
+        if (this.options.role !== "host") {
+          this.options.onHostSources?.(parsed.sources, parsed.activeSourceId);
+        }
         return;
       }
 
-      if (parsed.kind === "host-state") {
+      if (parsed.kind === "clipboard-sync") {
+        void this.applyRemoteClipboard(parsed);
+        return;
+      }
+
+      if (parsed.kind === "file-transfer-start") {
+        this.beginIncomingFileTransfer(parsed);
+        return;
+      }
+
+      if (parsed.kind === "file-transfer-chunk") {
+        this.appendIncomingFileChunk(parsed);
+        return;
+      }
+
+      if (parsed.kind === "file-transfer-complete") {
+        void this.completeIncomingFileTransfer(parsed);
+        return;
+      }
+
+      if (this.options.role !== "host") {
+        return;
+      }
+
+      if (parsed.kind === "host-command") {
+        void this.handleHostCommand(parsed);
         return;
       }
 
@@ -344,6 +486,219 @@ export class RemoteControlClient {
     };
 
     this.controlChannel.send(JSON.stringify(message));
+  }
+
+  private resetPeerConnection(): void {
+    this.stopStatsPolling();
+    this.stopReconnectTimer();
+    this.controlChannel?.close();
+    this.peerConnection?.close();
+    this.controlChannel = undefined;
+    this.peerConnection = undefined;
+    this.videoTransceiver = undefined;
+    this.audioTransceiver = undefined;
+    this.pendingCandidates.length = 0;
+    this.previousStatsSample = undefined;
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.peerClientId || this.reconnectTimer) {
+      return;
+    }
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.recoverConnection();
+    }, 1500);
+  }
+
+  private stopReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  private async recoverConnection(): Promise<void> {
+    if (!this.peerClientId) {
+      return;
+    }
+
+    this.resetPeerConnection();
+
+    if (this.options.role === "host") {
+      if (!this.localStream) {
+        await this.startDesktopCapture();
+      } else {
+        const peerConnection = this.ensurePeerConnection();
+        for (const track of this.localStream.getTracks()) {
+          peerConnection.addTrack(track, this.localStream);
+        }
+      }
+
+      if (this.socket?.connected) {
+        await this.createOffer(this.peerClientId);
+      }
+    }
+  }
+
+  private startClipboardSync(): void {
+    this.stopClipboardSync();
+    this.clipboardSnapshot = window.remoteControl.readClipboardText();
+
+    this.clipboardTimer = setInterval(() => {
+      if (this.controlChannel?.readyState !== "open") {
+        return;
+      }
+
+      const currentText = window.remoteControl.readClipboardText();
+      if (currentText === this.clipboardSnapshot || currentText === this.remoteClipboardText) {
+        this.clipboardSnapshot = currentText;
+        return;
+      }
+
+      const message: ClipboardSyncMessage = {
+        kind: "clipboard-sync",
+        text: currentText
+      };
+
+      this.clipboardSnapshot = currentText;
+      this.controlChannel.send(JSON.stringify(message));
+    }, 800);
+  }
+
+  private stopClipboardSync(): void {
+    if (this.clipboardTimer) {
+      clearInterval(this.clipboardTimer);
+      this.clipboardTimer = undefined;
+    }
+  }
+
+  private async applyRemoteClipboard(message: ClipboardSyncMessage): Promise<void> {
+    this.remoteClipboardText = message.text;
+    if (window.remoteControl.readClipboardText() !== message.text) {
+      window.remoteControl.writeClipboardText(message.text);
+    }
+    this.clipboardSnapshot = message.text;
+  }
+
+  private beginIncomingFileTransfer(message: FileTransferStartMessage): void {
+    this.incomingTransfers.set(message.transferId, {
+      name: message.name,
+      size: message.size,
+      mimeType: message.mimeType,
+      chunks: [],
+      receivedBytes: 0
+    });
+    this.options.onStatus(`Receiving file: ${message.name}`);
+  }
+
+  private appendIncomingFileChunk(message: FileTransferChunkMessage): void {
+    const transfer = this.incomingTransfers.get(message.transferId);
+    if (!transfer) {
+      return;
+    }
+
+    const chunk = base64ToBytes(message.data);
+    transfer.chunks[message.index] = chunk;
+    transfer.receivedBytes += chunk.byteLength;
+  }
+
+  private async completeIncomingFileTransfer(message: FileTransferCompleteMessage): Promise<void> {
+    const transfer = this.incomingTransfers.get(message.transferId);
+    if (!transfer) {
+      return;
+    }
+
+    this.incomingTransfers.delete(message.transferId);
+    const bytes = concatBytes(transfer.chunks);
+    const result = await window.remoteControl.saveIncomingFile(transfer.name, bytes);
+
+    if (!result.ok) {
+      this.options.onStatus(result.error ?? `Failed to save ${transfer.name}`);
+      return;
+    }
+
+    this.options.onFileReceived?.({
+      name: transfer.name,
+      path: result.path
+    });
+    this.options.onStatus(`Saved file to ${result.path}`);
+  }
+
+  private startStatsPolling(): void {
+    this.stopStatsPolling();
+    this.statsTimer = setInterval(() => {
+      void this.collectStats();
+    }, 1000);
+    void this.collectStats();
+  }
+
+  private stopStatsPolling(): void {
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+  }
+
+  private async collectStats(): Promise<void> {
+    if (!this.peerConnection || this.peerConnection.connectionState !== "connected") {
+      return;
+    }
+
+    const report = await this.peerConnection.getStats();
+    let videoBytes = 0;
+    let audioBytes = 0;
+    let packetsLost = 0;
+    let packetsReceived = 0;
+    let latencyMs: number | undefined;
+    const timestamp = Date.now();
+
+    for (const stat of report.values()) {
+      if (stat.type === "candidate-pair" && "currentRoundTripTime" in stat && stat.nominated) {
+        latencyMs = typeof stat.currentRoundTripTime === "number" ? Math.round(stat.currentRoundTripTime * 1000) : latencyMs;
+      }
+
+      if (this.options.role === "viewer" && stat.type === "inbound-rtp") {
+        if (stat.kind === "video") {
+          videoBytes += stat.bytesReceived ?? 0;
+          packetsLost += stat.packetsLost ?? 0;
+          packetsReceived += stat.packetsReceived ?? 0;
+        }
+        if (stat.kind === "audio") {
+          audioBytes += stat.bytesReceived ?? 0;
+        }
+      }
+
+      if (this.options.role === "host" && stat.type === "outbound-rtp") {
+        if (stat.kind === "video") {
+          videoBytes += stat.bytesSent ?? 0;
+        }
+        if (stat.kind === "audio") {
+          audioBytes += stat.bytesSent ?? 0;
+        }
+      }
+    }
+
+    const previous = this.previousStatsSample;
+    this.previousStatsSample = { timestamp, videoBytes, audioBytes, packetsLost, packetsReceived };
+
+    if (!previous) {
+      return;
+    }
+
+    const elapsedSeconds = Math.max((timestamp - previous.timestamp) / 1000, 0.001);
+    const videoBitrateKbps = Math.max(0, ((videoBytes - previous.videoBytes) * 8) / elapsedSeconds / 1000);
+    const audioBitrateKbps = Math.max(0, ((audioBytes - previous.audioBytes) * 8) / elapsedSeconds / 1000);
+    const totalPackets = packetsReceived + packetsLost;
+
+    this.options.onStats?.({
+      latencyMs,
+      videoBitrateKbps: Math.round(videoBitrateKbps),
+      audioBitrateKbps: Math.round(audioBitrateKbps),
+      packetsLost,
+      packetLossPercent: totalPackets > 0 ? Math.round((packetsLost / totalPackets) * 1000) / 10 : 0
+    });
   }
 
   private setCodecPreferences(transceiver: RTCRtpTransceiver): void {
@@ -488,4 +843,61 @@ function parseDataChannelMessage(value: unknown): DataChannelMessage | undefined
   } catch {
     return undefined;
   }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return result;
+}
+
+function createTransferId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function waitForChannelDrain(channel: RTCDataChannel): Promise<void> {
+  if (channel.bufferedAmount < 512 * 1024) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const previousThreshold = channel.bufferedAmountLowThreshold;
+    channel.bufferedAmountLowThreshold = 256 * 1024;
+
+    const cleanup = (): void => {
+      channel.onbufferedamountlow = null;
+      channel.bufferedAmountLowThreshold = previousThreshold;
+      resolve();
+    };
+
+    channel.onbufferedamountlow = cleanup;
+    setTimeout(cleanup, 200);
+  });
 }

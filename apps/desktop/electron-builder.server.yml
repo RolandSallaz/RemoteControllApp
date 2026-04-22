@@ -1,6 +1,7 @@
 appId: dev.remote-control.server
 productName: RemoteControl Server
 artifactName: RemoteControl-Server-${version}-windows-${arch}.${ext}
+electronUpdaterCompatibility: ">=2.16"
 directories:
   output: release-server
 files:
@@ -8,7 +9,14 @@ files:
   - backend/**/*
   - package.json
 asar: true
+publish:
+  provider: github
+  owner: RolandSallaz
+  repo: RemoteControllApp
+  channel: server
 win:
   signAndEditExecutable: false
   target:
-    - portable
+    - nsis
+nsis:
+  artifactName: RemoteControl-Server-${version}-Setup-${arch}.${ext}

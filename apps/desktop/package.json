@@ -1,6 +1,6 @@
 {
   "name": "@remote-control/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "RemoteControl desktop client",
   "author": "RemoteControl",
@@ -12,11 +12,11 @@
     "dev:client-app": "node scripts/run-electron-vite.mjs dev viewer",
     "preview": "node scripts/run-electron-vite.mjs preview",
     "build": "npm run typecheck && electron-vite build",
-    "build:win": "npm run build && electron-builder --win portable",
+    "build:win": "npm run build && electron-builder --win nsis",
     "prepare:backend": "node scripts/copy-backend.mjs",
     "prepare:release": "node scripts/prepare-release.mjs",
-    "build:server-app": "npm run build --workspace @remote-control/shared && npm run build --workspace @remote-control/server && npm run prepare:backend && cross-env REMOTE_CONTROL_APP_MODE=host npm run build && electron-builder --config electron-builder.server.yml --win portable",
-    "build:client-app": "cross-env REMOTE_CONTROL_APP_MODE=viewer npm run build && electron-builder --config electron-builder.client.yml --win portable",
+    "build:server-app": "npm run build --workspace @remote-control/shared && npm run build --workspace @remote-control/server && npm run prepare:backend && cross-env REMOTE_CONTROL_APP_MODE=host npm run build && electron-builder --config electron-builder.server.yml --win nsis",
+    "build:client-app": "cross-env REMOTE_CONTROL_APP_MODE=viewer npm run build && electron-builder --config electron-builder.client.yml --win nsis",
     "build:apps": "npm run build:server-app && npm run build:client-app",
     "build:release": "npm run build:apps && npm run prepare:release",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
@@ -40,13 +40,14 @@
     }
   },
   "dependencies": {
-    "@remote-control/shared": "0.1.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-socket.io": "^11.0.0",
     "@nestjs/websockets": "^11.0.0",
+    "@remote-control/shared": "0.2.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "electron-updater": "^6.8.3",
     "electron-vite": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

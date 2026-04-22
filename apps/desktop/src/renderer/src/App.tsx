@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactElement, type RefObject
 import type { ControlMessage, DiscoveredServer, HostSource, PeerJoinedPayload, PeerRole } from "@remote-control/shared";
 
 import type { DesktopCaptureSource, EmbeddedBackendStatus } from "./env";
-import { RemoteControlClient, type CaptureMode, type FrameRate } from "./webrtc/RemoteControlClient";
+import {
+  RemoteControlClient,
+  type CaptureMode,
+  type ConnectionStats,
+  type FrameRate
+} from "./webrtc/RemoteControlClient";
 
 const defaultServerUrl = "http://localhost:47315";
 const defaultSessionId = "LAN";
@@ -24,6 +29,12 @@ export function App(): ReactElement {
   const [remoteStream, setRemoteStream] = useState<MediaStream | undefined>();
   const [isConnected, setIsConnected] = useState(false);
   const [controlEnabled, setControlEnabled] = useState(false);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [transferProgress, setTransferProgress] = useState<number | undefined>();
+  const [transferLabel, setTransferLabel] = useState<string | undefined>();
+  const [connectionStats, setConnectionStats] = useState<ConnectionStats | undefined>();
+  const [saveDirectory, setSaveDirectory] = useState("");
+  const [receivedFileNotice, setReceivedFileNotice] = useState<{ name: string; path?: string } | undefined>();
   const [hostSources, setHostSources] = useState<HostSource[]>([]);
   const [activeRemoteSourceId, setActiveRemoteSourceId] = useState<string | undefined>();
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
@@ -34,6 +45,7 @@ export function App(): ReactElement {
 
   const clientRef = useRef<RemoteControlClient | undefined>(undefined);
   const hostAutoConnectStartedRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -44,6 +56,10 @@ export function App(): ReactElement {
 
   useEffect(() => {
     document.title = window.remoteControl.productName;
+  }, []);
+
+  useEffect(() => {
+    void loadFileSettings();
   }, []);
 
   useEffect(() => {
@@ -137,6 +153,10 @@ export function App(): ReactElement {
         setHostSources(nextSources);
         setActiveRemoteSourceId(activeSourceId);
       },
+      onStats: setConnectionStats,
+      onFileReceived: (file) => {
+        setReceivedFileNotice(file);
+      },
       onLocalStream: setLocalStream,
       onRemoteStream: setRemoteStream
     });
@@ -157,9 +177,13 @@ export function App(): ReactElement {
     clientRef.current = undefined;
     setIsConnected(false);
     setControlEnabled(false);
+    setTransferProgress(undefined);
+    setTransferLabel(undefined);
+    setConnectionStats(undefined);
     setHostSources([]);
     setActiveRemoteSourceId(undefined);
     setPeer(undefined);
+    setReceivedFileNotice(undefined);
     setStatus("Disconnected");
     if (appMode === "host") {
       hostAutoConnectStartedRef.current = false;
@@ -179,6 +203,25 @@ export function App(): ReactElement {
     clientRef.current?.sendHostCommand(sourceId);
   }
 
+  async function sendSelectedFile(file: File): Promise<void> {
+    if (!isConnected || !clientRef.current || !peer) {
+      return;
+    }
+
+    setTransferLabel(file.name);
+    setTransferProgress(0);
+    setStatus(`Sending file: ${file.name}`);
+
+    try {
+      await clientRef.current.sendFile(file, setTransferProgress);
+      setTransferProgress(100);
+      setStatus(`File sent: ${file.name}`);
+    } catch (error) {
+      setTransferProgress(undefined);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function syncEmbeddedBackend(): Promise<void> {
     const backend = await window.remoteControl.getBackendStatus();
     setBackendStatus(backend);
@@ -186,6 +229,44 @@ export function App(): ReactElement {
     setServerUrl(backend.url);
     if (!isConnected) {
       setStatus(backend.status === "running" ? `Backend ready: ${backend.url}` : `Backend ${backend.status}: ${backend.url}`);
+    }
+  }
+
+  async function loadFileSettings(): Promise<void> {
+    try {
+      const settings = await window.remoteControl.getFileSettings();
+      setSaveDirectory(settings.saveDirectory);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function chooseSaveDirectory(): Promise<void> {
+    try {
+      const result = await window.remoteControl.chooseSaveDirectory();
+      if (!result.ok) {
+        if (result.path) {
+          setSaveDirectory(result.path);
+        }
+        if (result.error) {
+          setStatus(result.error);
+        }
+        return;
+      }
+
+      if (result.path) {
+        setSaveDirectory(result.path);
+        setStatus(`Incoming files folder: ${result.path}`);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openReceivedFolder(path?: string): Promise<void> {
+    const result = await window.remoteControl.openSaveDirectory(path);
+    if (!result.ok && result.error) {
+      setStatus(result.error);
     }
   }
 
@@ -211,6 +292,29 @@ export function App(): ReactElement {
 
   return (
     <div className={`app-shell${appMode === "host" ? " host-mode" : ""}`}>
+      {receivedFileNotice && (
+        <div className="file-toast" role="status" aria-live="polite">
+          <div className="file-toast-body">
+            <div className="file-toast-title">File received</div>
+            <div className="file-toast-text" title={receivedFileNotice.path ?? receivedFileNotice.name}>
+              {receivedFileNotice.name}
+            </div>
+            {receivedFileNotice.path && (
+              <div className="file-toast-path" title={receivedFileNotice.path}>
+                {receivedFileNotice.path}
+              </div>
+            )}
+          </div>
+          <div className="file-toast-actions">
+            <button type="button" onClick={() => void openReceivedFolder(receivedFileNotice.path)}>
+              Open Folder
+            </button>
+            <button type="button" onClick={() => setReceivedFileNotice(undefined)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
       <aside className="sidebar">
         <div className="sidebar-header">
           <div className="brand-icon">RC</div>
@@ -244,7 +348,54 @@ export function App(): ReactElement {
                     <span className="server-stat-value accent">{peer ? (peer.displayName ?? "Connected") : "None"}</span>
                   </div>
                 </div>
+              </div>
 
+              <div className="section">
+                <div className="section-label">File Transfer</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void sendSelectedFile(file);
+                    }
+                    event.target.value = "";
+                  }}
+                />
+                <button
+                  type="button"
+                  className="connect-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!isConnected || !peer}
+                >
+                  Send File To Viewer
+                </button>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void chooseSaveDirectory()}
+                >
+                  Receive Folder
+                </button>
+                <div className="path-hint" title={saveDirectory}>
+                  {saveDirectory}
+                </div>
+                {transferLabel && (
+                  <div className="transfer-status">
+                    <div className="transfer-meta">
+                      <span className="transfer-name">{transferLabel}</span>
+                      <span className="transfer-percent">{transferProgress ?? 0}%</span>
+                    </div>
+                    <div className="transfer-bar">
+                      <div
+                        className="transfer-bar-fill"
+                        style={{ width: `${transferProgress ?? 0}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -330,6 +481,103 @@ export function App(): ReactElement {
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+
+            {role === "viewer" && (
+              <div className="field">
+                <label>File Transfer</label>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void sendSelectedFile(file);
+                    }
+                    event.target.value = "";
+                  }}
+                />
+                <div
+                  className={`file-dropzone${isDraggingFile ? " dragging" : ""}${!isConnected ? " disabled" : ""}`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (isConnected) setIsDraggingFile(true);
+                  }}
+                  onDragLeave={(event) => {
+                    event.preventDefault();
+                    setIsDraggingFile(false);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setIsDraggingFile(false);
+                    const file = event.dataTransfer.files?.[0];
+                    if (file) {
+                      void sendSelectedFile(file);
+                    }
+                  }}
+                >
+                  <div className="file-dropzone-title">Drop file here</div>
+                  <div className="file-dropzone-sub">or choose a file and send it to the host</div>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={!isConnected}
+                  >
+                    Choose File
+                  </button>
+                </div>
+                <div className="inline-actions">
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => void chooseSaveDirectory()}
+                  >
+                    Receive Folder
+                  </button>
+                  <div className="path-hint" title={saveDirectory}>
+                    {saveDirectory}
+                  </div>
+                </div>
+                {transferLabel && (
+                  <div className="transfer-status">
+                    <div className="transfer-meta">
+                      <span className="transfer-name">{transferLabel}</span>
+                      <span className="transfer-percent">{transferProgress ?? 0}%</span>
+                    </div>
+                    <div className="transfer-bar">
+                      <div
+                        className="transfer-bar-fill"
+                        style={{ width: `${transferProgress ?? 0}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {role === "viewer" && isConnected && connectionStats && (
+              <div className="stats-card">
+                <div className="stats-card-title">Connection</div>
+                <div className="stats-grid">
+                  <div className="stats-item">
+                    <span className="stats-label">Latency</span>
+                    <strong>{formatLatency(connectionStats.latencyMs)}</strong>
+                  </div>
+                  <div className="stats-item">
+                    <span className="stats-label">Video</span>
+                    <strong>{formatBitrate(connectionStats.videoBitrateKbps)}</strong>
+                  </div>
+                  <div className="stats-item">
+                    <span className="stats-label">Audio</span>
+                    <strong>{formatBitrate(connectionStats.audioBitrateKbps)}</strong>
+                  </div>
+                  <div className="stats-item">
+                    <span className="stats-label">Loss</span>
+                    <strong>{formatPacketLoss(connectionStats.packetLossPercent, connectionStats.packetsLost)}</strong>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -558,4 +806,20 @@ function getDefaultCaptureSource(sources: DesktopCaptureSource[]): DesktopCaptur
     const name = source.name.toLowerCase();
     return name.includes("screen") || name.includes("display") || name.includes("entire");
   }) ?? sources[0];
+}
+
+function formatLatency(value?: number): string {
+  return typeof value === "number" ? `${value} ms` : "—";
+}
+
+function formatBitrate(value?: number): string {
+  return typeof value === "number" && value > 0 ? `${value} kbps` : "—";
+}
+
+function formatPacketLoss(percent?: number, packetsLost?: number): string {
+  if (typeof percent !== "number") {
+    return "—";
+  }
+
+  return `${percent}%${typeof packetsLost === "number" ? ` (${packetsLost})` : ""}`;
 }

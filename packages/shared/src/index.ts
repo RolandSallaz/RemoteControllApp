@@ -144,7 +144,39 @@ export type HostCommandMessage = {
   };
 };
 
-export type DataChannelMessage = ControlMessage | HostStateMessage | HostCommandMessage;
+export type ClipboardSyncMessage = {
+  kind: "clipboard-sync";
+  text: string;
+};
+
+export type FileTransferStartMessage = {
+  kind: "file-transfer-start";
+  transferId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+export type FileTransferChunkMessage = {
+  kind: "file-transfer-chunk";
+  transferId: string;
+  index: number;
+  data: string;
+};
+
+export type FileTransferCompleteMessage = {
+  kind: "file-transfer-complete";
+  transferId: string;
+};
+
+export type DataChannelMessage =
+  | ControlMessage
+  | HostStateMessage
+  | HostCommandMessage
+  | ClipboardSyncMessage
+  | FileTransferStartMessage
+  | FileTransferChunkMessage
+  | FileTransferCompleteMessage;
 
 export type ServerToClientEvents = {
   "session:joined": (payload: PeerJoinedPayload) => void;
