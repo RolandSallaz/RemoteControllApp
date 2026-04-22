@@ -6,7 +6,9 @@ import type {
   FileTransferChunkMessage,
   FileTransferCompleteMessage,
   FileTransferStartMessage,
+  HostCommandMessage,
   HostSource,
+  JoinSessionResponse,
   PeerJoinedPayload,
   PeerRole,
   RtcIceCandidate,
@@ -48,6 +50,8 @@ export type RemoteControlClientOptions = {
   onStatus: (status: string) => void;
   onPeer: (peer: PeerJoinedPayload | undefined) => void;
   onHostSources?: (sources: HostSource[], activeSourceId?: string) => void;
+  onControlReady?: () => void;
+  onPasswordRequired?: (message: string) => Promise<string | undefined>;
   onStats?: (stats: ConnectionStats | undefined) => void;
   onFileReceived?: (file: { name: string; path?: string }) => void;
   onLocalStream: (stream: MediaStream | undefined) => void;
@@ -63,6 +67,8 @@ export class RemoteControlClient {
   private audioTransceiver?: RTCRtpTransceiver;
   private peerClientId?: string;
   private currentCaptureSourceId?: string;
+  private currentAudioEnabled = true;
+  private currentFrameRate: FrameRate;
   private iceServers: TurnCredentials[] = [{ urls: ["stun:stun.l.google.com:19302"] }];
   private readonly pendingCandidates: RTCIceCandidateInit[] = [];
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -81,6 +87,7 @@ export class RemoteControlClient {
 
   constructor(private readonly options: RemoteControlClientOptions) {
     this.currentCaptureSourceId = options.captureSourceId;
+    this.currentFrameRate = options.frameRate ?? 30;
   }
 
   async connect(): Promise<void> {
@@ -157,6 +164,28 @@ export class RemoteControlClient {
     this.controlChannel.send(JSON.stringify(message));
   }
 
+  sendHostStreamSettings(settings: { audioEnabled: boolean; frameRate: FrameRate }): void {
+    if (this.options.role !== "viewer") {
+      return;
+    }
+
+    if (this.controlChannel?.readyState !== "open") {
+      this.options.onStatus("Control channel is not ready yet");
+      return;
+    }
+
+    const message: HostCommandMessage = {
+      kind: "host-command",
+      command: {
+        type: "update-stream-settings",
+        audioEnabled: settings.audioEnabled,
+        frameRate: settings.frameRate
+      }
+    };
+
+    this.controlChannel.send(JSON.stringify(message));
+  }
+
   async sendFile(file: File, onProgress?: (progress: number) => void): Promise<void> {
     if (this.controlChannel?.readyState !== "open") {
       throw new Error("Control channel is not ready yet");
@@ -205,17 +234,7 @@ export class RemoteControlClient {
   private registerSocketHandlers(socket: ClientSocket): void {
     socket.on("connect", () => {
       this.options.onStatus(`Connected as ${this.options.role}`);
-      socket.emit(
-        "session:join",
-        {
-          sessionId: this.options.sessionId,
-          role: this.options.role,
-          displayName: this.options.displayName
-        },
-        (response) => {
-          this.options.onStatus(`Joined session ${this.options.sessionId} as ${response.clientId}`);
-        }
-      );
+      this.joinSession();
     });
 
     socket.on("disconnect", () => {
@@ -268,6 +287,43 @@ export class RemoteControlClient {
     });
   }
 
+  private joinSession(password?: string): void {
+    if (!this.socket) {
+      return;
+    }
+
+    this.socket.emit(
+      "session:join",
+      {
+        sessionId: this.options.sessionId,
+        role: this.options.role,
+        displayName: this.options.displayName,
+        password
+      },
+      (response) => {
+        void this.handleJoinResponse(response);
+      }
+    );
+  }
+
+  private async handleJoinResponse(response: JoinSessionResponse): Promise<void> {
+    if ("clientId" in response) {
+      this.options.onStatus(`Joined session ${this.options.sessionId} as ${response.clientId}`);
+      return;
+    }
+
+    if (response.passwordRequired && this.options.onPasswordRequired) {
+      const password = await this.options.onPasswordRequired(response.error);
+      if (typeof password === "string") {
+        this.joinSession(password);
+        return;
+      }
+    }
+
+    this.options.onStatus(response.error);
+    this.disconnect();
+  }
+
   private async startDesktopCapture(): Promise<void> {
     if (!this.currentCaptureSourceId) {
       throw new Error("Host mode requires a selected desktop source");
@@ -275,14 +331,16 @@ export class RemoteControlClient {
 
     this.options.onStatus("Starting desktop capture");
 
-    const frameRate = this.options.frameRate ?? 30;
+    const frameRate = this.currentFrameRate;
     const constraints = {
-      audio: {
-        mandatory: {
-          chromeMediaSource: "desktop",
-          chromeMediaSourceId: this.currentCaptureSourceId
-        }
-      },
+      audio: this.currentAudioEnabled
+        ? {
+            mandatory: {
+              chromeMediaSource: "desktop",
+              chromeMediaSourceId: this.currentCaptureSourceId
+            }
+          }
+        : false,
       video: {
         mandatory: {
           chromeMediaSource: "desktop",
@@ -316,7 +374,8 @@ export class RemoteControlClient {
       this.setCodecPreferences(this.videoTransceiver);
     }
 
-    const audioSender = peerConnection.getSenders().find((candidate) => candidate.track?.kind === "audio");
+    const audioSender = this.audioTransceiver?.sender
+      ?? peerConnection.getSenders().find((candidate) => candidate.track?.kind === "audio");
     if (nextAudioTrack) {
       if (audioSender) {
         await audioSender.replaceTrack(nextAudioTrack);
@@ -395,6 +454,7 @@ export class RemoteControlClient {
     channel.onopen = () => {
       this.options.onStatus("Control channel ready");
       this.startClipboardSync();
+      this.options.onControlReady?.();
       if (this.options.role === "host") {
         void this.publishHostState();
       }
@@ -456,6 +516,24 @@ export class RemoteControlClient {
   }
 
   private async handleHostCommand(message: Extract<DataChannelMessage, { kind: "host-command" }>): Promise<void> {
+    if (message.command.type === "update-stream-settings") {
+      const nextFrameRate = message.command.frameRate ?? this.currentFrameRate;
+      const nextAudioEnabled = typeof message.command.audioEnabled === "boolean"
+        ? message.command.audioEnabled
+        : this.currentAudioEnabled;
+      const hasChanged = nextFrameRate !== this.currentFrameRate || nextAudioEnabled !== this.currentAudioEnabled;
+
+      this.currentFrameRate = nextFrameRate;
+      this.currentAudioEnabled = nextAudioEnabled;
+
+      if (hasChanged) {
+        await this.startDesktopCapture();
+        await this.applyVideoEncoderParams();
+        this.options.onStatus(`Stream updated: ${this.currentFrameRate} FPS, audio ${this.currentAudioEnabled ? "on" : "off"}`);
+      }
+      return;
+    }
+
     if (message.command.type !== "switch-source") {
       return;
     }
@@ -732,7 +810,7 @@ export class RemoteControlClient {
     }
 
     const isGame = this.options.captureMode === "game";
-    const frameRate = this.options.frameRate ?? 30;
+    const frameRate = this.currentFrameRate;
 
     for (const encoding of params.encodings) {
       encoding.maxBitrate = isGame ? 15_000_000 : 8_000_000;

@@ -1,6 +1,6 @@
 {
   "name": "@remote-control/desktop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "RemoteControl desktop client",
   "author": "RemoteControl",
@@ -45,7 +45,7 @@
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-socket.io": "^11.0.0",
     "@nestjs/websockets": "^11.0.0",
-    "@remote-control/shared": "0.2.1",
+    "@remote-control/shared": "0.2.2",
     "@vitejs/plugin-react": "^5.0.0",
     "electron-updater": "^6.8.3",
     "electron-vite": "^5.0.0",

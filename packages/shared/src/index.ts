@@ -8,6 +8,21 @@ export type JoinSessionPayload = {
   sessionId: SessionId;
   role: PeerRole;
   displayName?: string;
+  password?: string;
+};
+
+export type JoinSessionResponse =
+  | {
+      clientId: ClientId;
+    }
+  | {
+      error: string;
+      passwordRequired?: boolean;
+    };
+
+export type ViewerShortcutSettings = {
+  disconnectShortcut: string;
+  switchMonitorShortcut: string;
 };
 
 export type PeerJoinedPayload = {
@@ -54,6 +69,14 @@ export type TurnCredentials = {
 export type TurnConfigPayload = {
   iceServers: TurnCredentials[];
 };
+
+export type HostSettings = {
+  accessPassword?: string;
+  launchOnStartup?: boolean;
+  saveDirectory?: string;
+};
+
+export type UpdateHostSettingsPayload = Partial<HostSettings>;
 
 export const REMOTE_CONTROL_DISCOVERY_PORT = 38761;
 export const REMOTE_CONTROL_DISCOVERY_REQUEST = "remote-control.discovery.request";
@@ -130,6 +153,8 @@ export type HostSource = {
   name: string;
 };
 
+export type StreamFrameRate = 15 | 30 | 60;
+
 export type HostStateMessage = {
   kind: "host-state";
   activeSourceId?: string;
@@ -138,10 +163,16 @@ export type HostStateMessage = {
 
 export type HostCommandMessage = {
   kind: "host-command";
-  command: {
-    type: "switch-source";
-    sourceId: string;
-  };
+  command:
+    | {
+        type: "switch-source";
+        sourceId: string;
+      }
+    | {
+        type: "update-stream-settings";
+        audioEnabled?: boolean;
+        frameRate?: StreamFrameRate;
+      };
 };
 
 export type ClipboardSyncMessage = {
@@ -189,7 +220,7 @@ export type ServerToClientEvents = {
 };
 
 export type ClientToServerEvents = {
-  "session:join": (payload: JoinSessionPayload, ack?: (response: { clientId: ClientId }) => void) => void;
+  "session:join": (payload: JoinSessionPayload, ack?: (response: JoinSessionResponse) => void) => void;
   "signal:offer": (payload: WebRtcDescriptionPayload) => void;
   "signal:answer": (payload: WebRtcDescriptionPayload) => void;
   "signal:ice-candidate": (payload: IceCandidatePayload) => void;

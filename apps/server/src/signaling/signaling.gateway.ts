@@ -18,6 +18,7 @@ import type {
 import type { Server, Socket } from "socket.io";
 
 import { SessionsService } from "./sessions.service.js";
+import { SettingsService } from "../settings/settings.service.js";
 import { TurnService } from "../turn/turn.service.js";
 
 type ClientSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
@@ -37,6 +38,8 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   constructor(
     @Inject(SessionsService)
     private readonly sessions: SessionsService,
+    @Inject(SettingsService)
+    private readonly settings: SettingsService,
     @Inject(TurnService)
     private readonly turn: TurnService
   ) {}
@@ -60,10 +63,23 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   async joinSession(
     @ConnectedSocket() client: ClientSocket,
     @MessageBody() payload: JoinSessionPayload
-  ): Promise<{ clientId: string } | undefined> {
+  ): Promise<{ clientId: string } | { error: string; passwordRequired?: boolean } | undefined> {
     if (!payload.sessionId || !payload.role) {
       client.emit("error", { message: "sessionId and role are required" });
       return undefined;
+    }
+
+    if (payload.role === "viewer") {
+      const settings = await this.settings.getHostSettings();
+      const accessPassword = settings.accessPassword?.trim();
+      if (accessPassword && payload.password !== accessPassword) {
+        const message = payload.password ? "Invalid server password" : "Server password required";
+        client.emit("error", { message });
+        return {
+          error: message,
+          passwordRequired: true
+        };
+      }
     }
 
     const previousSession = this.sessions.removePeer(client.id);

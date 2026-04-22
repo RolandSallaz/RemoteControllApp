@@ -38,7 +38,8 @@ export async function startEmbeddedBackend(options: {
     PORT: String(port),
     CORS_ORIGIN: process.env.CORS_ORIGIN ?? "*",
     DISCOVERY_ENABLED: "true",
-    REMOTE_CONTROL_SERVER_NAME: process.env.REMOTE_CONTROL_SERVER_NAME ?? "RemoteControl Server"
+    REMOTE_CONTROL_SERVER_NAME: process.env.REMOTE_CONTROL_SERVER_NAME ?? "RemoteControl Server",
+    REMOTE_CONTROL_SETTINGS_PATH: join(app.getPath("userData"), "host-settings.json")
   };
 
   const spawnConfig = options.isDev ? getDevBackendSpawnConfig() : getPackagedBackendSpawnConfig();
