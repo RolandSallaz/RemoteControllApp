@@ -1,0 +1,13 @@
+appId: dev.remote-control.server
+productName: RemoteControl Server
+directories:
+  output: release-server
+files:
+  - out/**/*
+  - backend/**/*
+  - package.json
+asar: true
+win:
+  signAndEditExecutable: false
+  target:
+    - portable

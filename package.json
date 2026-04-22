@@ -1,0 +1,23 @@
+{
+  "name": "remote-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote desktop control prototype built with Electron, React, WebRTC, Socket.IO, and NestJS.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev:server",
+    "dev:server": "npm run build --workspace @remote-control/shared && npm run dev -w @remote-control/server",
+    "dev:desktop": "npm run build --workspace @remote-control/shared && npm run dev -w @remote-control/desktop",
+    "dev:server-app": "npm run build --workspace @remote-control/shared && npm run build --workspace @remote-control/server && npm run dev:server-app -w @remote-control/desktop",
+    "dev:client-app": "npm run build --workspace @remote-control/shared && npm run dev:client-app -w @remote-control/desktop",
+    "build": "npm run build --workspace @remote-control/shared && npm run build --workspace @remote-control/server && npm run build --workspace @remote-control/desktop",
+    "build:desktop-apps": "npm run build:apps --workspace @remote-control/desktop",
+    "typecheck": "npm run build --workspace @remote-control/shared && npm run typecheck --workspace @remote-control/server && npm run typecheck --workspace @remote-control/desktop"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
