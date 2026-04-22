@@ -85,7 +85,3 @@ apps/server    NestJS signaling server
 packages/shared shared protocol types
 infra/coturn   optional TURN server
 ```
-
-## Notes
-
-This is an MVP for private/local usage and rapid iteration. It is not yet a hardened production remote access product.

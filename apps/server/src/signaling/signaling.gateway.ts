@@ -22,6 +22,7 @@ import type {
 import type { Server, Socket } from "socket.io";
 
 import { SessionCapacityError, SessionsService } from "./sessions.service.js";
+import { SlidingWindowRateLimiter, readPositiveIntegerEnv } from "./rateLimit.js";
 import { SettingsService } from "../settings/settings.service.js";
 import { TurnService } from "../turn/turn.service.js";
 
@@ -34,12 +35,28 @@ const viewerApprovalTimeoutMs = 30_000;
     origin: process.env.CORS_ORIGIN?.split(",") ?? true,
     credentials: true
   },
+  maxHttpBufferSize: readPositiveIntegerEnv("REMOTE_CONTROL_SOCKET_MAX_PAYLOAD_BYTES", 1_000_000),
   transports: ["websocket"]
 })
 export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy {
   @WebSocketServer()
   private readonly server!: SignalingServer;
   private stalePeerCleanupTimer?: ReturnType<typeof setInterval>;
+  private readonly clientAddressById = new Map<string, string>();
+  private readonly connectionCountsByAddress = new Map<string, number>();
+  private readonly maxConnectionsPerAddress = readPositiveIntegerEnv("REMOTE_CONTROL_MAX_CONNECTIONS_PER_ADDRESS", 16);
+  private readonly joinAttemptLimiter = new SlidingWindowRateLimiter(
+    readPositiveIntegerEnv("REMOTE_CONTROL_JOIN_ATTEMPTS_PER_WINDOW", 30),
+    readPositiveIntegerEnv("REMOTE_CONTROL_JOIN_ATTEMPT_WINDOW_MS", 60_000)
+  );
+  private readonly passwordAttemptLimiter = new SlidingWindowRateLimiter(
+    readPositiveIntegerEnv("REMOTE_CONTROL_PASSWORD_ATTEMPTS_PER_WINDOW", 8),
+    readPositiveIntegerEnv("REMOTE_CONTROL_PASSWORD_ATTEMPT_WINDOW_MS", 300_000)
+  );
+  private readonly approvalRequestLimiter = new SlidingWindowRateLimiter(
+    readPositiveIntegerEnv("REMOTE_CONTROL_APPROVAL_REQUESTS_PER_WINDOW", 6),
+    readPositiveIntegerEnv("REMOTE_CONTROL_APPROVAL_REQUEST_WINDOW_MS", 60_000)
+  );
 
   constructor(
     @Inject(SessionsService)
@@ -65,10 +82,20 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   }
 
   handleConnection(client: ClientSocket): void {
-    client.emit("turn:config", this.turn.getIceConfig());
+    const address = getClientAddress(client);
+    const nextCount = (this.connectionCountsByAddress.get(address) ?? 0) + 1;
+    if (nextCount > this.maxConnectionsPerAddress) {
+      client.emit("error", { message: "Too many signaling connections from this address" });
+      client.disconnect(true);
+      return;
+    }
+
+    this.clientAddressById.set(client.id, address);
+    this.connectionCountsByAddress.set(address, nextCount);
   }
 
   handleDisconnect(client: ClientSocket): void {
+    this.releaseClientAddress(client);
     const removedPeer = this.sessions.removePeer(client.id);
     if (!removedPeer) {
       return;
@@ -91,12 +118,18 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     }
 
     this.cleanupExpiredPeers();
+    const clientAddress = this.getClientAddressForRateLimit(client);
+    if (!this.joinAttemptLimiter.consume(clientAddress)) {
+      const message = "Too many join attempts, try again later";
+      client.emit("error", { message });
+      return { error: message };
+    }
 
     if (joinPayload.role === "viewer") {
       const settings = await this.settings.getHostSettings();
-      const passwordAccepted = await this.settings.verifyHostPassword(joinPayload.password);
-      if (!passwordAccepted) {
-        const message = joinPayload.password ? "Invalid server password" : "Server password required";
+      const passwordAttemptKey = `${clientAddress}:${joinPayload.sessionId}`;
+      if (!this.passwordAttemptLimiter.isAllowed(passwordAttemptKey)) {
+        const message = "Too many password attempts, try again later";
         client.emit("error", { message });
         return {
           error: message,
@@ -104,7 +137,26 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
         };
       }
 
+      const passwordAccepted = await this.settings.verifyHostPassword(joinPayload.password);
+      if (!passwordAccepted) {
+        this.passwordAttemptLimiter.record(passwordAttemptKey);
+        const message = joinPayload.password ? "Invalid server password" : "Server password required";
+        client.emit("error", { message });
+        return {
+          error: message,
+          passwordRequired: true
+        };
+      }
+      this.passwordAttemptLimiter.reset(passwordAttemptKey);
+
       if (settings.requireViewerApproval ?? true) {
+        const approvalKey = `${clientAddress}:${joinPayload.sessionId}`;
+        if (!this.approvalRequestLimiter.consume(approvalKey)) {
+          const message = "Too many approval requests, try again later";
+          client.emit("error", { message });
+          return { error: message };
+        }
+
         const approved = await this.requestViewerApproval(client, joinPayload);
         if (!approved) {
           const message = "Connection rejected by host";
@@ -276,6 +328,26 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     return `session:${sessionId}`;
   }
 
+  private getClientAddressForRateLimit(client: ClientSocket): string {
+    return this.clientAddressById.get(client.id) ?? getClientAddress(client);
+  }
+
+  private releaseClientAddress(client: ClientSocket): void {
+    const address = this.clientAddressById.get(client.id);
+    if (!address) {
+      return;
+    }
+
+    this.clientAddressById.delete(client.id);
+    const nextCount = (this.connectionCountsByAddress.get(address) ?? 1) - 1;
+    if (nextCount <= 0) {
+      this.connectionCountsByAddress.delete(address);
+      return;
+    }
+
+    this.connectionCountsByAddress.set(address, nextCount);
+  }
+
   private cleanupExpiredPeers(): void {
     for (const removedPeer of this.sessions.removeExpiredPeers()) {
       this.server.to(this.roomName(removedPeer.sessionId)).emit("session:left", {
@@ -430,4 +502,14 @@ function isRtcDescriptionType(value: unknown): value is "answer" | "offer" | "pr
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function getClientAddress(client: ClientSocket): string {
+  const forwardedFor = client.handshake.headers["x-forwarded-for"];
+  const forwardedAddress = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  if (forwardedAddress) {
+    return forwardedAddress.split(",")[0]?.trim() || client.handshake.address || "unknown";
+  }
+
+  return client.handshake.address || "unknown";
 }

@@ -32,6 +32,43 @@ export type ConnectionStats = {
   packetLossPercent?: number;
 };
 
+export type RemoteControlDiagnosticCode =
+  | "SIGNALING_CONNECTING"
+  | "SIGNALING_CONNECTED"
+  | "SIGNALING_DISCONNECTED"
+  | "SIGNALING_ERROR"
+  | "SIGNALING_RECONNECTING"
+  | "SIGNALING_RECONNECTED"
+  | "SESSION_JOINED"
+  | "SESSION_JOIN_FAILED"
+  | "SESSION_PASSWORD_REQUIRED"
+  | "SESSION_PEER_LEFT"
+  | "SESSION_SHUTDOWN"
+  | "WEBRTC_STATE"
+  | "WEBRTC_RECONNECT_SCHEDULED"
+  | "WEBRTC_RECONNECT_FAILED"
+  | "CONTROL_CHANNEL_NOT_READY"
+  | "CONTROL_CHANNEL_READY"
+  | "CONTROL_CHANNEL_CLOSED"
+  | "CONTROL_CHANNEL_INVALID_MESSAGE"
+  | "CAPTURE_STARTING"
+  | "CAPTURE_SOURCE_UPDATED"
+  | "STREAM_SETTINGS_UPDATED"
+  | "CLIPBOARD_SYNC_INVALID"
+  | "FILE_TRANSFER_REJECTED"
+  | "FILE_TRANSFER_RECEIVING"
+  | "FILE_TRANSFER_FAILED"
+  | "FILE_TRANSFER_INCOMPLETE"
+  | "FILE_TRANSFER_SAVED"
+  | "FILE_TRANSFER_INTERRUPTED"
+  | "NETWORK_RECOVERY";
+
+export type RemoteControlDiagnostic = {
+  code: RemoteControlDiagnosticCode;
+  message: string;
+  details?: Record<string, string | number | boolean | undefined>;
+};
+
 type IncomingFileTransfer = {
   failed: boolean;
   name: string;
@@ -53,9 +90,14 @@ const maxClipboardTextLength = 1 * 1024 * 1024;
 const maxClipboardImageDataUrlLength = 12 * 1024 * 1024;
 const maxFileTransferBytes = 256 * 1024 * 1024;
 const maxFileTransferChunkBase64Length = 96 * 1024;
+const maxFileTransferChunkBytes = 72 * 1024;
 const maxFileTransferIdLength = 80;
 const maxFileNameLength = 260;
 const maxHostSources = 16;
+const maxIncomingTransfers = 4;
+const maxDataChannelMessageLength = 13 * 1024 * 1024;
+const imageDataUrlPrefixPattern = /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,/i;
+const mimeTypePattern = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 
 export type RemoteControlClientOptions = {
   role: PeerRole;
@@ -73,6 +115,7 @@ export type RemoteControlClientOptions = {
   onViewerApprovalRequest?: (request: ViewerApprovalRequestPayload) => Promise<boolean>;
   onStats?: (stats: ConnectionStats | undefined) => void;
   onFileReceived?: (file: { name: string; path?: string }) => void;
+  onDiagnostic?: (diagnostic: RemoteControlDiagnostic) => void;
   onLocalStream: (stream: MediaStream | undefined) => void;
   onRemoteStream: (stream: MediaStream | undefined) => void;
 };
@@ -127,7 +170,7 @@ export class RemoteControlClient {
       await this.startDesktopCapture();
     }
 
-    this.options.onStatus("Connecting to signaling server");
+    this.reportStatus("SIGNALING_CONNECTING", "Connecting to signaling server");
     this.socket = io(this.options.serverUrl, {
       transports: ["websocket"],
       reconnection: true,
@@ -174,7 +217,7 @@ export class RemoteControlClient {
     this.options.onStats?.(undefined);
     this.options.onLocalStream(undefined);
     this.options.onRemoteStream(undefined);
-    this.options.onStatus("Disconnected");
+    this.reportStatus("SIGNALING_DISCONNECTED", "Disconnected");
   }
 
   announceHostShutdown(reason = "Host is shutting down"): void {
@@ -194,7 +237,7 @@ export class RemoteControlClient {
     }
 
     if (this.controlChannel?.readyState !== "open") {
-      this.options.onStatus("Control channel is not ready yet");
+      this.reportStatus("CONTROL_CHANNEL_NOT_READY", "Control channel is not ready yet");
       return;
     }
 
@@ -207,7 +250,7 @@ export class RemoteControlClient {
     }
 
     if (this.controlChannel?.readyState !== "open") {
-      this.options.onStatus("Control channel is not ready yet");
+      this.reportStatus("CONTROL_CHANNEL_NOT_READY", "Control channel is not ready yet");
       return;
     }
 
@@ -228,7 +271,7 @@ export class RemoteControlClient {
     }
 
     if (this.controlChannel?.readyState !== "open") {
-      this.options.onStatus("Control channel is not ready yet");
+      this.reportStatus("CONTROL_CHANNEL_NOT_READY", "Control channel is not ready yet");
       return;
     }
 
@@ -301,7 +344,9 @@ export class RemoteControlClient {
 
   private registerSocketHandlers(socket: ClientSocket): void {
     socket.on("connect", () => {
-      this.options.onStatus(`Connected as ${this.options.role}`);
+      this.reportStatus("SIGNALING_CONNECTED", `Connected as ${this.options.role}`, {
+        role: this.options.role
+      });
       this.joinSession(this.lastSessionPassword);
     });
 
@@ -311,28 +356,32 @@ export class RemoteControlClient {
         return;
       }
 
-      this.options.onStatus("Signaling disconnected");
+      this.reportStatus("SIGNALING_DISCONNECTED", "Signaling disconnected");
       this.scheduleReconnect();
     });
 
     socket.on("connect_error", (error) => {
-      this.options.onStatus(`Signaling error: ${error.message}`);
+      this.reportStatus("SIGNALING_ERROR", `Signaling error: ${error.message}`, {
+        error: error.message
+      });
     });
 
     socket.io.on("reconnect_attempt", (attempt) => {
       if (!this.isDisconnected) {
-        this.options.onStatus(`Reconnecting signaling server (${attempt})`);
+        this.reportStatus("SIGNALING_RECONNECTING", `Reconnecting signaling server (${attempt})`, {
+          attempt
+        });
       }
     });
 
     socket.io.on("reconnect", () => {
       if (!this.isDisconnected) {
-        this.options.onStatus("Signaling reconnected");
+        this.reportStatus("SIGNALING_RECONNECTED", "Signaling reconnected");
       }
     });
 
     socket.on("error", (payload) => {
-      this.options.onStatus(payload.message);
+      this.reportStatus("SIGNALING_ERROR", payload.message);
     });
 
     socket.on("turn:config", (payload) => {
@@ -379,7 +428,9 @@ export class RemoteControlClient {
         this.options.onPeer(undefined);
         this.options.onRemoteStream(undefined);
         this.options.onStats?.(undefined);
-        this.options.onStatus("Peer left the session");
+        this.reportStatus("SESSION_PEER_LEFT", "Peer left the session", {
+          clientId: payload.clientId
+        });
       }
     });
 
@@ -390,7 +441,9 @@ export class RemoteControlClient {
         this.options.onPeer(undefined);
         this.options.onRemoteStream(undefined);
         this.options.onStats?.(undefined);
-        this.options.onStatus(payload.reason);
+        this.reportStatus("SESSION_SHUTDOWN", payload.reason, {
+          clientId: payload.clientId
+        });
       }
     });
 
@@ -432,12 +485,18 @@ export class RemoteControlClient {
 
   private async handleJoinResponse(response: JoinSessionResponse): Promise<void> {
     if ("clientId" in response) {
-      this.options.onStatus(`Joined session ${this.options.sessionId} as ${response.clientId}`);
+      this.reportStatus("SESSION_JOINED", `Joined session ${this.options.sessionId} as ${response.clientId}`, {
+        sessionId: this.options.sessionId,
+        clientId: response.clientId
+      });
       this.startSessionHeartbeat();
       return;
     }
 
     if (response.passwordRequired && this.options.onPasswordRequired) {
+      this.reportStatus("SESSION_PASSWORD_REQUIRED", response.error, {
+        sessionId: this.options.sessionId
+      });
       const password = await this.options.onPasswordRequired(response.error);
       if (typeof password === "string") {
         this.joinSession(password);
@@ -445,7 +504,9 @@ export class RemoteControlClient {
       }
     }
 
-    this.options.onStatus(response.error);
+    this.reportStatus("SESSION_JOIN_FAILED", response.error, {
+      sessionId: this.options.sessionId
+    });
     this.disconnect();
   }
 
@@ -454,7 +515,9 @@ export class RemoteControlClient {
       throw new Error("Host mode requires a selected desktop source");
     }
 
-    this.options.onStatus("Starting desktop capture");
+    this.reportStatus("CAPTURE_STARTING", "Starting desktop capture", {
+      sourceId: this.currentCaptureSourceId
+    });
 
     const frameRate = this.currentFrameRate;
     const constraints = {
@@ -546,7 +609,9 @@ export class RemoteControlClient {
     };
 
     peerConnection.onconnectionstatechange = () => {
-      this.options.onStatus(`WebRTC state: ${peerConnection.connectionState}`);
+      this.reportStatus("WEBRTC_STATE", `WebRTC state: ${peerConnection.connectionState}`, {
+        connectionState: peerConnection.connectionState
+      });
       if (peerConnection.connectionState === "connected" && this.options.role === "host") {
         void this.applyVideoEncoderParams();
       }
@@ -578,7 +643,7 @@ export class RemoteControlClient {
 
   private bindControlChannel(channel: RTCDataChannel): void {
     channel.onopen = () => {
-      this.options.onStatus("Control channel ready");
+      this.reportStatus("CONTROL_CHANNEL_READY", "Control channel ready");
       this.startClipboardSync();
       this.options.onControlReady?.();
       if (this.options.role === "host") {
@@ -589,12 +654,13 @@ export class RemoteControlClient {
     channel.onclose = () => {
       this.stopClipboardSync();
       this.failIncomingFileTransfers("Incoming file transfer interrupted");
-      this.options.onStatus("Control channel closed");
+      this.reportStatus("CONTROL_CHANNEL_CLOSED", "Control channel closed");
     };
 
     channel.onmessage = (event) => {
       const parsed = parseDataChannelMessage(event.data);
       if (!parsed) {
+        this.reportStatus("CONTROL_CHANNEL_INVALID_MESSAGE", "Ignored invalid control channel message");
         return;
       }
 
@@ -657,7 +723,14 @@ export class RemoteControlClient {
       if (hasChanged) {
         await this.startDesktopCapture();
         await this.applyVideoEncoderParams();
-        this.options.onStatus(`Stream updated: ${this.currentFrameRate} FPS, audio ${this.currentAudioEnabled ? "on" : "off"}`);
+        this.reportStatus(
+          "STREAM_SETTINGS_UPDATED",
+          `Stream updated: ${this.currentFrameRate} FPS, audio ${this.currentAudioEnabled ? "on" : "off"}`,
+          {
+            frameRate: this.currentFrameRate,
+            audioEnabled: this.currentAudioEnabled
+          }
+        );
       }
       return;
     }
@@ -673,7 +746,9 @@ export class RemoteControlClient {
 
     this.currentCaptureSourceId = message.command.sourceId;
     await this.startDesktopCapture();
-    this.options.onStatus("Capture source updated");
+    this.reportStatus("CAPTURE_SOURCE_UPDATED", "Capture source updated", {
+      sourceId: this.currentCaptureSourceId
+    });
   }
 
   private async publishHostState(): Promise<void> {
@@ -785,7 +860,7 @@ export class RemoteControlClient {
     }
 
     if (this.socket && !this.socket.connected) {
-      this.options.onStatus("Network restored, reconnecting signaling");
+      this.reportStatus("NETWORK_RECOVERY", "Network restored, reconnecting signaling");
       this.socket.connect();
       return;
     }
@@ -794,7 +869,7 @@ export class RemoteControlClient {
       return;
     }
 
-    this.options.onStatus("Network restored, refreshing session");
+    this.reportStatus("NETWORK_RECOVERY", "Network restored, refreshing session");
     this.sendSessionHeartbeat();
     this.joinSession(this.lastSessionPassword);
 
@@ -821,11 +896,14 @@ export class RemoteControlClient {
       }
 
       this.reconnectInProgress = true;
+      this.reportStatus("WEBRTC_RECONNECT_SCHEDULED", "Attempting WebRTC recovery");
       void this.recoverConnection()
         .catch((error) => {
           if (!this.isDisconnected) {
             const reason = error instanceof Error ? error.message : String(error);
-            this.options.onStatus(`Reconnect failed: ${reason}`);
+            this.reportStatus("WEBRTC_RECONNECT_FAILED", `Reconnect failed: ${reason}`, {
+              error: reason
+            });
           }
         })
         .finally(() => {
@@ -920,6 +998,7 @@ export class RemoteControlClient {
     const nextSnapshot = getClipboardSnapshot(data);
 
     if (!hasClipboardData(data)) {
+      this.reportStatus("CLIPBOARD_SYNC_INVALID", "Ignored empty or invalid clipboard payload");
       return;
     }
 
@@ -933,7 +1012,25 @@ export class RemoteControlClient {
   private beginIncomingFileTransfer(message: FileTransferStartMessage): void {
     const safeSize = Number.isFinite(message.size) ? Math.max(0, message.size) : 0;
     if (safeSize > maxFileTransferBytes) {
-      this.options.onStatus(`File transfer rejected: ${message.name} is too large`);
+      this.reportStatus("FILE_TRANSFER_REJECTED", `File transfer rejected: ${message.name} is too large`, {
+        name: message.name,
+        size: safeSize
+      });
+      return;
+    }
+
+    if (this.incomingTransfers.has(message.transferId)) {
+      this.reportStatus("FILE_TRANSFER_REJECTED", `File transfer rejected: duplicate transfer id for ${message.name}`, {
+        name: message.name,
+        transferId: message.transferId
+      });
+      return;
+    }
+
+    if (this.incomingTransfers.size >= maxIncomingTransfers) {
+      this.reportStatus("FILE_TRANSFER_REJECTED", `File transfer rejected: too many active incoming files (${maxIncomingTransfers})`, {
+        activeTransfers: this.incomingTransfers.size
+      });
       return;
     }
 
@@ -957,7 +1054,11 @@ export class RemoteControlClient {
       });
     transfer.queue.catch((error) => this.failIncomingFileTransfer(message.transferId, getErrorMessage(error)));
     this.incomingTransfers.set(message.transferId, transfer);
-    this.options.onStatus(`Receiving file: ${message.name}`);
+    this.reportStatus("FILE_TRANSFER_RECEIVING", `Receiving file: ${message.name}`, {
+      name: message.name,
+      size: safeSize,
+      transferId: message.transferId
+    });
   }
 
   private appendIncomingFileChunk(message: FileTransferChunkMessage): void {
@@ -1006,14 +1107,20 @@ export class RemoteControlClient {
     this.incomingTransfers.delete(message.transferId);
     if (transfer.receivedBytes !== transfer.size) {
       await window.remoteControl.abortIncomingFileTransfer(message.transferId);
-      this.options.onStatus(`File transfer incomplete: ${transfer.name}`);
+      this.reportStatus("FILE_TRANSFER_INCOMPLETE", `File transfer incomplete: ${transfer.name}`, {
+        name: transfer.name,
+        transferId: message.transferId
+      });
       return;
     }
 
     const result = await window.remoteControl.completeIncomingFileTransfer(message.transferId);
 
     if (!result.ok) {
-      this.options.onStatus(result.error ?? `Failed to save ${transfer.name}`);
+      this.reportStatus("FILE_TRANSFER_FAILED", result.error ?? `Failed to save ${transfer.name}`, {
+        name: transfer.name,
+        transferId: message.transferId
+      });
       return;
     }
 
@@ -1021,7 +1128,10 @@ export class RemoteControlClient {
       name: transfer.name,
       path: result.path
     });
-    this.options.onStatus(`Saved file to ${result.path}`);
+    this.reportStatus("FILE_TRANSFER_SAVED", `Saved file to ${result.path}`, {
+      name: transfer.name,
+      transferId: message.transferId
+    });
   }
 
   private failIncomingFileTransfer(transferId: string, reason: string): void {
@@ -1033,7 +1143,11 @@ export class RemoteControlClient {
     transfer.failed = true;
     this.incomingTransfers.delete(transferId);
     void window.remoteControl.abortIncomingFileTransfer(transferId);
-    this.options.onStatus(`File transfer failed: ${transfer.name}: ${reason}`);
+    this.reportStatus("FILE_TRANSFER_FAILED", `File transfer failed: ${transfer.name}: ${reason}`, {
+      name: transfer.name,
+      transferId,
+      error: reason
+    });
   }
 
   private failIncomingFileTransfers(reason: string): void {
@@ -1043,7 +1157,22 @@ export class RemoteControlClient {
     }
 
     this.incomingTransfers.clear();
-    this.options.onStatus(`${reason}: ${interruptedCount} file${interruptedCount === 1 ? "" : "s"}`);
+    this.reportStatus("FILE_TRANSFER_INTERRUPTED", `${reason}: ${interruptedCount} file${interruptedCount === 1 ? "" : "s"}`, {
+      interruptedCount
+    });
+  }
+
+  private reportStatus(
+    code: RemoteControlDiagnosticCode,
+    message: string,
+    details?: Record<string, string | number | boolean | undefined>
+  ): void {
+    this.options.onStatus(message);
+    this.options.onDiagnostic?.({
+      code,
+      message,
+      details
+    });
   }
 
   private getOpenControlChannel(): RTCDataChannel {
@@ -1348,8 +1477,12 @@ function serializeIceCandidate(candidate: RTCIceCandidateInit): RtcIceCandidate 
   };
 }
 
-function parseDataChannelMessage(value: unknown): DataChannelMessage | undefined {
+export function parseDataChannelMessage(value: unknown): DataChannelMessage | undefined {
   if (typeof value !== "string") {
+    return undefined;
+  }
+
+  if (value.length > maxDataChannelMessageLength) {
     return undefined;
   }
 
@@ -1360,7 +1493,7 @@ function parseDataChannelMessage(value: unknown): DataChannelMessage | undefined
   }
 }
 
-function sanitizeDataChannelMessage(value: unknown): DataChannelMessage | undefined {
+export function sanitizeDataChannelMessage(value: unknown): DataChannelMessage | undefined {
   if (!isRecord(value) || typeof value.kind !== "string") {
     return undefined;
   }
@@ -1464,12 +1597,13 @@ function sanitizeControlKeyboardMessage(value: Record<string, unknown>): Control
   };
 }
 
-function sanitizeHostStateMessage(value: Record<string, unknown>): DataChannelMessage | undefined {
+export function sanitizeHostStateMessage(value: Record<string, unknown>): DataChannelMessage | undefined {
   if (!Array.isArray(value.sources) || value.sources.length > maxHostSources) {
     return undefined;
   }
 
   const sources: HostSource[] = [];
+  const sourceIds = new Set<string>();
   for (const source of value.sources) {
     if (!isRecord(source)) {
       return undefined;
@@ -1481,10 +1615,19 @@ function sanitizeHostStateMessage(value: Record<string, unknown>): DataChannelMe
       return undefined;
     }
 
+    if (sourceIds.has(id)) {
+      return undefined;
+    }
+
+    sourceIds.add(id);
     sources.push({ id, name });
   }
 
   const activeSourceId = sanitizeString(value.activeSourceId, 256);
+  if (activeSourceId && !sourceIds.has(activeSourceId)) {
+    return undefined;
+  }
+
   return {
     kind: "host-state",
     sources,
@@ -1492,7 +1635,7 @@ function sanitizeHostStateMessage(value: Record<string, unknown>): DataChannelMe
   };
 }
 
-function sanitizeHostCommandMessage(value: Record<string, unknown>): HostCommandMessage | undefined {
+export function sanitizeHostCommandMessage(value: Record<string, unknown>): HostCommandMessage | undefined {
   if (!isRecord(value.command) || typeof value.command.type !== "string") {
     return undefined;
   }
@@ -1509,6 +1652,10 @@ function sanitizeHostCommandMessage(value: Record<string, unknown>): HostCommand
     const audioEnabled = typeof value.command.audioEnabled === "boolean"
       ? value.command.audioEnabled
       : undefined;
+    if (typeof audioEnabled !== "boolean" && !frameRate) {
+      return undefined;
+    }
+
     return {
       kind: "host-command",
       command: {
@@ -1522,10 +1669,10 @@ function sanitizeHostCommandMessage(value: Record<string, unknown>): HostCommand
   return undefined;
 }
 
-function sanitizeClipboardSyncMessage(value: Record<string, unknown>): ClipboardSyncMessage | undefined {
+export function sanitizeClipboardSyncMessage(value: Record<string, unknown>): ClipboardSyncMessage | undefined {
   const text = sanitizeString(value.text, maxClipboardTextLength, false);
   const html = sanitizeString(value.html, maxClipboardTextLength, false);
-  const imageDataUrl = sanitizeString(value.imageDataUrl, maxClipboardImageDataUrlLength, false);
+  const imageDataUrl = sanitizeClipboardImageDataUrl(value.imageDataUrl);
   if (typeof text !== "string" && typeof html !== "string" && typeof imageDataUrl !== "string") {
     return undefined;
   }
@@ -1538,10 +1685,10 @@ function sanitizeClipboardSyncMessage(value: Record<string, unknown>): Clipboard
   };
 }
 
-function sanitizeFileTransferStartMessage(value: Record<string, unknown>): FileTransferStartMessage | undefined {
+export function sanitizeFileTransferStartMessage(value: Record<string, unknown>): FileTransferStartMessage | undefined {
   const transferId = sanitizeString(value.transferId, maxFileTransferIdLength);
   const name = sanitizeString(value.name, maxFileNameLength, false);
-  const mimeType = sanitizeString(value.mimeType, 128, false) ?? "application/octet-stream";
+  const mimeType = sanitizeMimeType(value.mimeType) ?? "application/octet-stream";
   const size = value.size;
   if (
     !transferId
@@ -1563,9 +1710,9 @@ function sanitizeFileTransferStartMessage(value: Record<string, unknown>): FileT
   };
 }
 
-function sanitizeFileTransferChunkMessage(value: Record<string, unknown>): FileTransferChunkMessage | undefined {
+export function sanitizeFileTransferChunkMessage(value: Record<string, unknown>): FileTransferChunkMessage | undefined {
   const transferId = sanitizeString(value.transferId, maxFileTransferIdLength);
-  const data = sanitizeString(value.data, maxFileTransferChunkBase64Length, false);
+  const data = sanitizeBase64(value.data, maxFileTransferChunkBase64Length, maxFileTransferChunkBytes);
   const index = value.index;
   if (!transferId || typeof data !== "string" || typeof index !== "number" || !Number.isInteger(index) || index < 0) {
     return undefined;
@@ -1579,7 +1726,7 @@ function sanitizeFileTransferChunkMessage(value: Record<string, unknown>): FileT
   };
 }
 
-function sanitizeFileTransferCompleteMessage(value: Record<string, unknown>): FileTransferCompleteMessage | undefined {
+export function sanitizeFileTransferCompleteMessage(value: Record<string, unknown>): FileTransferCompleteMessage | undefined {
   const transferId = sanitizeString(value.transferId, maxFileTransferIdLength);
   return transferId
     ? { kind: "file-transfer-complete", transferId }
@@ -1632,6 +1779,50 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function sanitizeMimeType(value: unknown): string | undefined {
+  const mimeType = sanitizeString(value, 128, false);
+  if (!mimeType) {
+    return undefined;
+  }
+
+  return mimeTypePattern.test(mimeType) ? mimeType : undefined;
+}
+
+function sanitizeClipboardImageDataUrl(value: unknown): string | undefined {
+  const imageDataUrl = sanitizeString(value, maxClipboardImageDataUrlLength, false);
+  if (!imageDataUrl || !imageDataUrlPrefixPattern.test(imageDataUrl)) {
+    return undefined;
+  }
+
+  const commaIndex = imageDataUrl.indexOf(",");
+  if (commaIndex < 0) {
+    return undefined;
+  }
+
+  const base64 = imageDataUrl.slice(commaIndex + 1);
+  return sanitizeBase64(base64, maxClipboardImageDataUrlLength, maxClipboardImageDataUrlLength)
+    ? imageDataUrl
+    : undefined;
+}
+
+function sanitizeBase64(value: unknown, maxLength: number, maxDecodedBytes: number): string | undefined {
+  const normalized = sanitizeString(value, maxLength, false);
+  if (!normalized || normalized.length === 0 || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+=*$/.test(normalized)) {
+    return undefined;
+  }
+
+  try {
+    const bytes = base64ToBytes(normalized);
+    if (bytes.byteLength > maxDecodedBytes) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 function readClipboardDataForSync(): ClipboardData {

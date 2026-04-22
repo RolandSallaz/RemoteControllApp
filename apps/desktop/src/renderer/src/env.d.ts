@@ -70,7 +70,6 @@ declare global {
       getFileSettings: () => Promise<{ saveDirectory: string }>;
       chooseSaveDirectory: () => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
       openSaveDirectory: (path?: string) => Promise<{ ok: boolean; error?: string }>;
-      saveIncomingFile: (name: string, bytes: Uint8Array) => Promise<{ ok: boolean; path?: string; error?: string }>;
       startIncomingFileTransfer: (transferId: string, name: string, size: number) => Promise<{
         ok: boolean;
         path?: string;

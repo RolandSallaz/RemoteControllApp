@@ -1,0 +1,31 @@
+{
+  "all": true,
+  "check-coverage": true,
+  "clean": true,
+  "report-dir": "coverage",
+  "reporter": [
+    "text",
+    "text-summary",
+    "json-summary",
+    "lcov"
+  ],
+  "include": [
+    "apps/desktop/src/main/**/*.ts",
+    "apps/desktop/src/preload/**/*.ts",
+    "apps/server/src/**/*.ts",
+    "packages/shared/src/**/*.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.d.ts",
+    "apps/**/dist/**",
+    "apps/**/out/**",
+    "apps/desktop/backend/**",
+    "coverage/**",
+    "scripts/**"
+  ],
+  "branches": 70,
+  "functions": 85,
+  "lines": 35,
+  "statements": 35
+}

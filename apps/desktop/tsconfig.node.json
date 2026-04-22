@@ -7,5 +7,6 @@
     "lib": ["ES2022"],
     "allowSyntheticDefaultImports": true
   },
-  "include": ["electron.vite.config.ts", "src/main/**/*.ts", "src/preload/**/*.ts"]
+  "include": ["electron.vite.config.ts", "src/main/**/*.ts", "src/preload/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }
