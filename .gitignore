@@ -4,6 +4,7 @@ out/
 release/
 release-*/
 apps/desktop/backend/
+apps/desktop/release-artifacts/
 coverage/
 logs/
 .pid/

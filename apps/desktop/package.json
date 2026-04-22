@@ -14,9 +14,11 @@
     "build": "npm run typecheck && electron-vite build",
     "build:win": "npm run build && electron-builder --win portable",
     "prepare:backend": "node scripts/copy-backend.mjs",
+    "prepare:release": "node scripts/prepare-release.mjs",
     "build:server-app": "npm run build --workspace @remote-control/shared && npm run build --workspace @remote-control/server && npm run prepare:backend && cross-env REMOTE_CONTROL_APP_MODE=host npm run build && electron-builder --config electron-builder.server.yml --win portable",
     "build:client-app": "cross-env REMOTE_CONTROL_APP_MODE=viewer npm run build && electron-builder --config electron-builder.client.yml --win portable",
     "build:apps": "npm run build:server-app && npm run build:client-app",
+    "build:release": "npm run build:apps && npm run prepare:release",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
   },
   "build": {

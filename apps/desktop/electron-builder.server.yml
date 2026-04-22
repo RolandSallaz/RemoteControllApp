@@ -1,5 +1,6 @@
 appId: dev.remote-control.server
 productName: RemoteControl Server
+artifactName: RemoteControl-Server-${version}-windows-${arch}.${ext}
 directories:
   output: release-server
 files:

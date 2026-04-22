@@ -1,5 +1,6 @@
 appId: dev.remote-control.client
 productName: RemoteControl Client
+artifactName: RemoteControl-Client-${version}-windows-${arch}.${ext}
 directories:
   output: release-client
 files:
