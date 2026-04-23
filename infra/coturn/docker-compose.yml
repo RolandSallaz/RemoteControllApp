@@ -1,0 +1,19 @@
+services:
+  coturn:
+    image: coturn/coturn:latest
+    container_name: remote-control-coturn
+    restart: unless-stopped
+    ports:
+      - "${TURN_LISTEN_PORT:-3478}:3478/tcp"
+      - "${TURN_LISTEN_PORT:-3478}:3478/udp"
+      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--realm=${TURN_REALM:?set TURN_REALM}"
+      - "--external-ip=${TURN_EXTERNAL_IP:?set TURN_EXTERNAL_IP}"
+      - "--user=${TURN_USERNAME:?set TURN_USERNAME}:${TURN_CREDENTIAL:?set TURN_CREDENTIAL}"
+      - "--min-port=${TURN_MIN_PORT:-49160}"
+      - "--max-port=${TURN_MAX_PORT:-49200}"

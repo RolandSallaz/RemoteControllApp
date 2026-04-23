@@ -15,7 +15,7 @@ publish:
   repo: RemoteControllApp
   channel: server
 win:
-  signAndEditExecutable: false
+  signAndEditExecutable: true
   target:
     - nsis
 nsis:

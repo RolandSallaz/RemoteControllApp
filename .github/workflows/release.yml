@@ -27,8 +27,16 @@ jobs:
 
       - name: Build release artifacts
         shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: |
           $env:RELEASE_TAG = "${{ github.ref_name }}"
+          if ($env:CSC_LINK -and $env:CSC_KEY_PASSWORD) {
+            Write-Host "Windows code signing is enabled for this release."
+          } else {
+            Write-Host "Windows code signing secrets are not configured; building unsigned installers."
+          }
           npm run build:release
 
       - name: Publish GitHub Release

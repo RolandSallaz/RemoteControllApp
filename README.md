@@ -34,6 +34,18 @@ After starting the Server App, open the Client App and either select the discove
 - Disconnect: `Ctrl+Alt+Shift+D`
 - Exit input capture: `Ctrl+Alt+Shift+Esc`
 
+## TURN For NAT Traversal
+
+For stricter NATs, deploy the bundled coturn setup in `infra/coturn` and configure the signaling server with the same `TURN_URLS`, `TURN_USERNAME`, and `TURN_CREDENTIAL` values.
+
+```bash
+cd infra/coturn
+cp .env.example .env
+docker compose --env-file .env up -d
+```
+
+See `infra/coturn/README.md` for required ports and server environment variables.
+
 ## Development
 
 Requirements:
