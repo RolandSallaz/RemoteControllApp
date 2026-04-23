@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const searchRoots = ["apps", "packages"];
@@ -44,7 +44,7 @@ const nodeArgs = [
   "tsconfig.base.json",
   "--test",
   "--test-concurrency=1",
-  "--test-isolation=none",
+  ...getOptionalTestRunnerArgs(),
   ...testFiles
 ];
 
@@ -118,6 +118,18 @@ function getCoverageNodeArgs() {
     "--test-coverage-include=apps/server/src/**/*.ts",
     "--test-coverage-include=packages/shared/src/**/*.ts"
   ];
+}
+
+function getOptionalTestRunnerArgs() {
+  return supportsNodeCliFlag("--test-isolation=none") ? ["--test-isolation=none"] : [];
+}
+
+function supportsNodeCliFlag(flag) {
+  const probe = spawnSync(process.execPath, [flag, "-e", "0"], {
+    stdio: "ignore"
+  });
+
+  return probe.status === 0;
 }
 
 async function writeCoverageSummary(coverageDirectory) {
