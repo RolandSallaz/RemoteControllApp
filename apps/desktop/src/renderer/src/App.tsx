@@ -4,64 +4,42 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ErrorInfo,
   type ReactElement,
-  type ReactNode,
-  type RefObject
+  type ReactNode
 } from "react";
 import type {
   ControlMessage,
-  DiscoveredServer,
-  HostSource,
-  PeerJoinedPayload,
   PeerRole,
   ViewerApprovalRequestPayload
 } from "@remote-control/shared";
 
 import type { DesktopCaptureSource, EmbeddedBackendStatus, ViewerSettings } from "./env";
 import {
-  RemoteControlClient,
   type CaptureMode,
-  type ConnectionStats,
   type FrameRate
 } from "./webrtc/RemoteControlClient";
 import {
-  extractServerLabel,
-  formatBitrate,
   formatFileSize,
-  formatLatency,
-  formatPacketLoss,
   getDefaultCaptureSource,
   getDisplayName,
-  getRemoteControlViewState
+  getRemoteControlViewState,
+  hasDraggedFiles
 } from "./appLogic";
+import { AppOverlays } from "./components/AppOverlays";
+import { AppSidebar } from "./components/AppSidebar";
+import { HostSettingsPage } from "./components/HostSettingsPage";
+import { VideoStage } from "./components/VideoStage";
+import { useFullscreen } from "./hooks/useFullscreen";
+import { useServerDiscovery } from "./hooks/useServerDiscovery";
+import { useWebRTC } from "./hooks/useWebRTC";
+import { isEditableTarget, isKeyboardShortcut } from "./hotkeys";
 
 const defaultServerUrl = "http://localhost:47315";
 const defaultSessionId = "LAN";
 const appMode = window.remoteControl.appMode;
 const isSettingsPage = new URLSearchParams(window.location.search).get("page") === "host-settings";
 const fixedRole: PeerRole | undefined = appMode === "combined" ? undefined : appMode;
-const viewerOverlayButtonSize = 38;
-const viewerOverlayMargin = 8;
-const viewerOverlayGap = 8;
-const viewerPanelSafeMargin = 14;
-const viewerSettingsPanelWidth = 360;
-const viewerHotkeysPanelWidth = 340;
-
-type ViewerOverlayPosition = {
-  top: number;
-  right: number;
-};
-
-type ViewerOverlayDragState = {
-  moved: boolean;
-  pointerId: number;
-  startRight: number;
-  startTop: number;
-  startX: number;
-  startY: number;
-};
 
 export function App(): ReactElement {
   return (
@@ -118,30 +96,13 @@ function RemoteControlApp(): ReactElement {
   const [sources, setSources] = useState<DesktopCaptureSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [status, setStatus] = useState("Ready to connect");
-  const [peer, setPeer] = useState<PeerJoinedPayload | undefined>();
-  const [localStream, setLocalStream] = useState<MediaStream | undefined>();
-  const [remoteStream, setRemoteStream] = useState<MediaStream | undefined>();
-  const [isConnected, setIsConnected] = useState(false);
-  const [controlEnabled, setControlEnabled] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const [transferProgress, setTransferProgress] = useState<number | undefined>();
-  const [transferLabel, setTransferLabel] = useState<string | undefined>();
-  const [connectionStats, setConnectionStats] = useState<ConnectionStats | undefined>();
   const [saveDirectory, setSaveDirectory] = useState("");
-  const [receivedFileNotice, setReceivedFileNotice] = useState<{ name: string; path?: string } | undefined>();
-  const [hostSources, setHostSources] = useState<HostSource[]>([]);
-  const [activeRemoteSourceId, setActiveRemoteSourceId] = useState<string | undefined>();
-  const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
-  const [serverLatencies, setServerLatencies] = useState<Map<string, number>>(new Map());
-  const [isDiscovering, setIsDiscovering] = useState(false);
   const [isHotkeysOpen, setIsHotkeysOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState<EmbeddedBackendStatus>({ status: "disabled" });
   const [captureMode, setCaptureMode] = useState<CaptureMode>("desktop");
   const [frameRate, setFrameRate] = useState<FrameRate>(30);
-  const [launchOnStartup, setLaunchOnStartup] = useState(false);
-  const [hostAccessPassword, setHostAccessPassword] = useState("");
   const [recentServers, setRecentServers] = useState<string[]>([]);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isViewerSettingsOpen, setIsViewerSettingsOpen] = useState(false);
   const [connectInFullscreen, setConnectInFullscreen] = useState(true);
   const [captureLocalInput, setCaptureLocalInput] = useState(false);
@@ -153,7 +114,14 @@ function RemoteControlApp(): ReactElement {
   const [viewerApprovalPrompt, setViewerApprovalPrompt] = useState<ViewerApprovalRequestPayload | undefined>();
   const [isSetupSettingsOpen, setIsSetupSettingsOpen] = useState(false);
 
-  const clientRef = useRef<RemoteControlClient | undefined>(undefined);
+  const webRtc = useWebRTC();
+  const {
+    enterFullscreen,
+    isFullscreen,
+    leaveFullscreen,
+    syncFullscreenState,
+    toggleFullscreen
+  } = useFullscreen();
   const hostAutoConnectStartedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -161,6 +129,31 @@ function RemoteControlApp(): ReactElement {
   const passwordPromptResolverRef = useRef<((password?: string) => void) | undefined>(undefined);
   const viewerApprovalResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
   const displayName = getDisplayName(role, deviceName);
+  const {
+    activeRemoteSourceId,
+    connectionStats,
+    controlEnabled,
+    hostSources,
+    isConnected,
+    localStream,
+    peer,
+    receivedFileNotice,
+    remoteStream,
+    transferLabel,
+    transferProgress
+  } = webRtc;
+  const {
+    discoveredServers,
+    isDiscovering,
+    scanServers,
+    serverLatencies
+  } = useServerDiscovery({
+    defaultServerUrl,
+    isConnected,
+    serverUrl,
+    setServerUrl,
+    setStatus
+  });
 
   const selectedSource = useMemo(
     () => sources.find((source) => source.id === selectedSourceId),
@@ -169,8 +162,6 @@ function RemoteControlApp(): ReactElement {
 
   useEffect(() => {
     void loadFileSettings();
-    void loadHostAccessSettings();
-    void loadLaunchSettings();
     void loadViewerSettings();
     void loadRecentServers();
     void loadDeviceName();
@@ -181,8 +172,6 @@ function RemoteControlApp(): ReactElement {
     if (appMode !== "host") return;
     return window.remoteControl.onHostSettingsClosed(() => {
       void loadFileSettings();
-      void loadHostAccessSettings();
-      void loadLaunchSettings();
     });
   }, []);
 
@@ -253,19 +242,13 @@ function RemoteControlApp(): ReactElement {
   }, [backendStatus.status, backendStatus.url, isConnected, role, selectedSourceId]);
 
   useEffect(() => {
-    return () => {
-      clientRef.current?.disconnect();
-    };
-  }, []);
-
-  useEffect(() => {
     if (appMode !== "host") {
       return;
     }
 
     return window.remoteControl.onHostShutdownRequested(() => {
       setStatus("Host is shutting down");
-      clientRef.current?.announceHostShutdown("Host is shutting down");
+      webRtc.announceHostShutdown("Host is shutting down");
     });
   }, []);
 
@@ -359,78 +342,50 @@ function RemoteControlApp(): ReactElement {
   }
 
   async function connect(): Promise<void> {
-    clientRef.current?.disconnect();
-
-    const client = new RemoteControlClient({
-      role,
-      sessionId: sessionId.trim(),
-      serverUrl: serverUrl.trim(),
-      displayName: displayName.trim() || role,
-      captureSourceId: role === "host" ? selectedSourceId : undefined,
-      captureMode: role === "host" ? captureMode : undefined,
-      frameRate: role === "host" ? frameRate : undefined,
-      onStatus: setStatus,
-      onPeer: setPeer,
-      onHostSources: (nextSources, activeSourceId) => {
-        setHostSources(nextSources);
-        setActiveRemoteSourceId(activeSourceId);
-      },
-      onControlReady: () => {
-        if (role === "viewer") {
-          clientRef.current?.sendHostStreamSettings({
-            audioEnabled: receiveStreamAudio,
-            frameRate: viewerFrameRate
-          });
-        }
-      },
-      onPasswordRequired: requestServerPassword,
-      onViewerApprovalRequest: requestViewerApproval,
-      onStats: setConnectionStats,
-      onFileReceived: (file) => {
-        setReceivedFileNotice(file);
-      },
-      onLocalStream: setLocalStream,
-      onRemoteStream: setRemoteStream
-    });
-
-    clientRef.current = client;
-    setIsConnected(true);
-
     try {
-      await client.connect();
+      await webRtc.connect({
+        role,
+        sessionId: sessionId.trim(),
+        serverUrl: serverUrl.trim(),
+        displayName: displayName.trim() || role,
+        captureSourceId: role === "host" ? selectedSourceId : undefined,
+        captureMode: role === "host" ? captureMode : undefined,
+        frameRate: role === "host" ? frameRate : undefined,
+        onStatus: setStatus,
+        onControlReady: () => {
+          if (role === "viewer") {
+            webRtc.sendHostStreamSettings({
+              audioEnabled: receiveStreamAudio,
+              frameRate: viewerFrameRate
+            });
+          }
+        },
+        onPasswordRequired: requestServerPassword,
+        onViewerApprovalRequest: requestViewerApproval
+      });
+
       if (role === "viewer") {
         const result = await window.remoteControl.addRecentServer(serverUrl.trim());
         if (result.recentServers) {
           setRecentServers(result.recentServers);
         }
         if (captureLocalInput) {
-          setControlEnabled(true);
+          webRtc.setControlEnabled(true);
         }
         if (connectInFullscreen) {
           await enterFullscreen();
         }
       }
     } catch (error) {
-      setIsConnected(false);
       setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
   function disconnect(): void {
-    clientRef.current?.disconnect();
-    clientRef.current = undefined;
-    setIsConnected(false);
-    setControlEnabled(false);
-    setTransferProgress(undefined);
-    setTransferLabel(undefined);
-    setConnectionStats(undefined);
-    setHostSources([]);
-    setActiveRemoteSourceId(undefined);
-    setPeer(undefined);
+    webRtc.disconnect();
     viewerApprovalResolverRef.current?.(false);
     viewerApprovalResolverRef.current = undefined;
     setViewerApprovalPrompt(undefined);
-    setReceivedFileNotice(undefined);
     setIsViewerSettingsOpen(false);
     setStatus("Disconnected");
     if (role === "viewer") {
@@ -446,31 +401,15 @@ function RemoteControlApp(): ReactElement {
       return;
     }
 
-    clientRef.current?.sendControlMessage(message);
+    webRtc.sendControlMessage(message);
   }
 
   function switchRemoteSource(sourceId: string): void {
-    setActiveRemoteSourceId(sourceId);
-    clientRef.current?.sendHostCommand(sourceId);
+    webRtc.switchRemoteSource(sourceId);
   }
 
   async function sendSelectedFile(file: File): Promise<void> {
-    if (!isConnected || !clientRef.current || !peer) {
-      return;
-    }
-
-    setTransferLabel(file.name);
-    setTransferProgress(0);
-    setStatus(`Sending file: ${file.name}`);
-
-    try {
-      await clientRef.current.sendFile(file, setTransferProgress);
-      setTransferProgress(100);
-      setStatus(`File sent: ${file.name}`);
-    } catch (error) {
-      setTransferProgress(undefined);
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
+    await webRtc.sendFile(file, setStatus);
   }
 
   function handleFileInputChange(event: React.ChangeEvent<HTMLInputElement>): void {
@@ -548,28 +487,6 @@ function RemoteControlApp(): ReactElement {
     }
   }
 
-  async function loadLaunchSettings(): Promise<void> {
-    try {
-      const settings = await window.remoteControl.getLaunchSettings();
-      setLaunchOnStartup(settings.launchOnStartup);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function loadHostAccessSettings(): Promise<void> {
-    if (appMode !== "host") {
-      return;
-    }
-
-    try {
-      const settings = await window.remoteControl.getHostAccessSettings();
-      setHostAccessPassword(settings.accessPassword);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   async function loadViewerSettings(): Promise<void> {
     if (appMode === "host") {
       return;
@@ -584,7 +501,7 @@ function RemoteControlApp(): ReactElement {
       setReceiveStreamAudio(settings.receiveAudio);
       setSwitchMonitorShortcut(settings.switchMonitorShortcut);
       if (settings.captureLocalInput) {
-        setControlEnabled(true);
+        webRtc.setControlEnabled(true);
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -604,15 +521,6 @@ function RemoteControlApp(): ReactElement {
       setDeviceName(await window.remoteControl.getDeviceName());
     } catch {
       setDeviceName("");
-    }
-  }
-
-  async function syncFullscreenState(): Promise<void> {
-    try {
-      const state = await window.remoteControl.getFullscreenState();
-      setIsFullscreen(state.isFullScreen);
-    } catch {
-      // ignore state sync errors
     }
   }
 
@@ -645,31 +553,6 @@ function RemoteControlApp(): ReactElement {
     }
   }
 
-  async function changeLaunchOnStartup(enabled: boolean): Promise<void> {
-    setLaunchOnStartup(enabled);
-    const result = await window.remoteControl.setLaunchOnStartup(enabled);
-    if (!result.ok) {
-      setLaunchOnStartup(!enabled);
-      if (result.error) {
-        setStatus(result.error);
-      }
-    }
-  }
-
-  async function changeHostAccessPassword(password: string): Promise<void> {
-    setHostAccessPassword(password);
-    const result = await window.remoteControl.setHostAccessPassword(password);
-    if (!result.ok) {
-      if (result.error) {
-        setStatus(result.error);
-      }
-      return;
-    }
-
-    setHostAccessPassword(result.accessPassword ?? "");
-    setStatus(result.accessPasswordSet ? "Server password updated" : "Server password cleared");
-  }
-
   function requestServerPassword(message: string): Promise<string | undefined> {
     setPasswordPrompt({ message, password: "" });
     return new Promise((resolve) => {
@@ -682,7 +565,7 @@ function RemoteControlApp(): ReactElement {
     passwordPromptResolverRef.current = undefined;
     setPasswordPrompt(undefined);
     if (typeof password !== "string") {
-      setIsConnected(false);
+      webRtc.disconnect();
       void leaveFullscreen();
     }
   }
@@ -721,7 +604,7 @@ function RemoteControlApp(): ReactElement {
       return;
     }
 
-    clientRef.current?.sendHostStreamSettings({
+    webRtc.sendHostStreamSettings({
       audioEnabled: receiveAudio,
       frameRate
     });
@@ -736,13 +619,13 @@ function RemoteControlApp(): ReactElement {
     setCaptureLocalInput(enabled);
     saveViewerSettings({ captureLocalInput: enabled });
     if (enabled) {
-      setControlEnabled(true);
+      webRtc.setControlEnabled(true);
       setIsViewerSettingsOpen(false);
     }
   }
 
   function changeControlEnabled(enabled: boolean): void {
-    setControlEnabled(enabled);
+    webRtc.setControlEnabled(enabled);
     if (!enabled && captureLocalInput) {
       changeCaptureLocalInput(false);
     }
@@ -783,77 +666,6 @@ function RemoteControlApp(): ReactElement {
     switchRemoteSource(nextSource.id);
   }
 
-  async function toggleFullscreen(): Promise<void> {
-    const result = await window.remoteControl.toggleFullscreen();
-    if (result.ok) {
-      setIsFullscreen(Boolean(result.isFullScreen));
-    }
-  }
-
-  async function enterFullscreen(): Promise<void> {
-    try {
-      const state = await window.remoteControl.getFullscreenState();
-      if (state.isFullScreen) {
-        setIsFullscreen(true);
-        return;
-      }
-
-      const result = await window.remoteControl.toggleFullscreen();
-      if (result.ok) {
-        setIsFullscreen(Boolean(result.isFullScreen));
-      }
-    } catch {
-      // Fullscreen is a convenience; keep the session connected if it fails.
-    }
-  }
-
-  async function leaveFullscreen(): Promise<void> {
-    try {
-      const state = await window.remoteControl.getFullscreenState();
-      if (!state.isFullScreen) {
-        setIsFullscreen(false);
-        return;
-      }
-
-      const result = await window.remoteControl.toggleFullscreen();
-      if (result.ok) {
-        setIsFullscreen(Boolean(result.isFullScreen));
-      }
-    } catch {
-      // ignore state sync errors
-    }
-  }
-
-  async function scanServers(): Promise<void> {
-    setIsDiscovering(true);
-    try {
-      const servers = await window.remoteControl.discoverServers();
-      setDiscoveredServers(servers);
-
-      if (!isConnected && servers[0] && serverUrl === defaultServerUrl) {
-        setServerUrl(servers[0].url);
-      }
-
-      setStatus(servers.length > 0 ? `Found ${servers.length} server${servers.length === 1 ? "" : "s"} on LAN` : "No LAN servers found");
-
-      const latencies = new Map<string, number>();
-      await Promise.all(servers.map(async (server) => {
-        try {
-          const start = performance.now();
-          await fetch(`${server.url}/stats`, { signal: AbortSignal.timeout(2000) });
-          latencies.set(server.url, Math.round(performance.now() - start));
-        } catch {
-          // unreachable or timed out — no latency shown
-        }
-      }));
-      setServerLatencies(latencies);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setIsDiscovering(false);
-    }
-  }
-
   function confirmAndDisconnect(): void {
     if (window.confirm("Disconnect from the remote host?")) {
       disconnect();
@@ -880,1513 +692,108 @@ function RemoteControlApp(): ReactElement {
       onDragLeave={handleFileDragLeave}
       onDrop={handleFileDrop}
     >
-      {role === "host" && isDraggingFile && isConnected && peer && (
-        <div className="global-file-drop-overlay" aria-hidden="true">
-          <div className="global-file-drop-card">
-            <div className="video-drop-title">Drop file to transfer</div>
-            <div className="video-drop-sub">Release to send it to the connected viewer</div>
-          </div>
-        </div>
-      )}
-      {receivedFileNotice && (
-        <div className="file-toast" role="status" aria-live="polite">
-          <div className="file-toast-body">
-            <div className="file-toast-title">File received</div>
-            <div className="file-toast-text" title={receivedFileNotice.path ?? receivedFileNotice.name}>
-              {receivedFileNotice.name}
-            </div>
-            {receivedFileNotice.path && (
-              <div className="file-toast-path" title={receivedFileNotice.path}>
-                {receivedFileNotice.path}
-              </div>
-            )}
-          </div>
-          <div className="file-toast-actions">
-            <button type="button" onClick={() => void openReceivedFolder(receivedFileNotice.path)}>
-              Open Folder
-            </button>
-            <button type="button" onClick={() => setReceivedFileNotice(undefined)}>
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-      {passwordPrompt && (
-        <div className="password-prompt-overlay">
-          <form
-            className="password-prompt-modal"
-            onSubmit={(event) => {
-              event.preventDefault();
-              resolvePasswordPrompt(passwordPrompt.password);
-            }}
-          >
-            <div className="password-prompt-header">
-              <div>
-                <div className="section-label">Password</div>
-                <h2>Server Password</h2>
-              </div>
-            </div>
-            <div className="password-prompt-body">
-              <div className="field">
-                <label>{passwordPrompt.message}</label>
-                <input
-                  autoFocus
-                  type="password"
-                  value={passwordPrompt.password}
-                  onChange={(event) => setPasswordPrompt({
-                    ...passwordPrompt,
-                    password: event.target.value
-                  })}
-                  placeholder="Enter server password"
-                />
-              </div>
-              <div className="password-prompt-actions">
-                <button type="button" className="secondary-action" onClick={() => resolvePasswordPrompt(undefined)}>
-                  Cancel
-                </button>
-                <button type="submit" className="connect-btn btn-primary" disabled={!passwordPrompt.password}>
-                  Connect
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-      )}
-      {viewerApprovalPrompt && (
-        <div className="password-prompt-overlay">
-          <div className="password-prompt-modal" role="dialog" aria-label="Viewer approval request">
-            <div className="password-prompt-header">
-              <div>
-                <div className="section-label">Connection Request</div>
-                <h2>Allow Viewer?</h2>
-              </div>
-            </div>
-            <div className="password-prompt-body">
-              <div className="approval-request-card">
-                <div className="approval-request-name">
-                  {viewerApprovalPrompt.displayName ?? "Viewer"}
-                </div>
-                <div className="approval-request-meta">
-                  Session {viewerApprovalPrompt.sessionId}
-                </div>
-              </div>
-              <div className="drop-hint">
-                A client is asking to view and control this host. Approve only if you recognize this request.
-              </div>
-              <div className="password-prompt-actions">
-                <button type="button" className="secondary-action" onClick={() => resolveViewerApproval(false)}>
-                  Deny
-                </button>
-                <button type="button" className="connect-btn btn-primary" onClick={() => resolveViewerApproval(true)}>
-                  Allow
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      <aside className="sidebar">
-        <div className="status-bar">
-          <div className={`status-dot ${isConnected ? "connected" : ""}`} />
-          <span className="status-text">{status}</span>
-        </div>
-
-        <div className="sidebar-body">
-          {appMode === "host" && (
-            <>
-              <div className="section">
-                <div className="section-label">Embedded Server</div>
-                <div className="server-card">
-                  <div className="server-stat-row">
-                    <span className="server-stat-label">Status</span>
-                    <ServerStatusBadge status={backendStatus.status} />
-                  </div>
-                  <div className="server-stat-row">
-                    <span className="server-stat-label">Address</span>
-                    <span className="server-stat-value mono">{backendStatus.url ?? "-"}</span>
-                  </div>
-                  <div className="server-stat-row">
-                    <span className="server-stat-label">Viewer</span>
-                    <span className="server-stat-value accent">{peer ? (peer.displayName ?? "Connected") : "None"}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="section">
-                <div className="section-label">File Transfer</div>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={handleFileInputChange}
-                />
-                <div className="host-actions">
-                  <button
-                    type="button"
-                    className="connect-btn"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={!isConnected || !peer}
-                  >
-                    Send File To Viewer
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void window.remoteControl.openHostSettings()}
-                  >
-                    Settings
-                  </button>
-                  {transferLabel && (
-                    <div className="transfer-status">
-                      <div className="transfer-meta">
-                        <span className="transfer-name">{transferLabel}</span>
-                        <span className="transfer-percent">{transferProgress ?? 0}%</span>
-                      </div>
-                      <div className="transfer-bar">
-                        <div
-                          className="transfer-bar-fill"
-                          style={{ width: `${transferProgress ?? 0}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
-          {appMode !== "host" && (
-          <>
-            {/* LAN discovery — shown first for quick access */}
-            {role === "viewer" && !isConnected && (
-              <div className="setup-section">
-                <div className="setup-section-header">
-                  <span className="section-label">LAN Servers</span>
-                  <button
-                    type="button"
-                    className="setup-scan-btn"
-                    onClick={() => void scanServers()}
-                    disabled={isDiscovering}
-                  >
-                    {isDiscovering ? "Scanning…" : "Scan"}
-                  </button>
-                </div>
-                {discoveredServers.length === 0 ? (
-                  <div className="setup-empty-hint">
-                    {isDiscovering
-                      ? "Searching for servers on your network…"
-                      : "Press Scan to find servers on your local network."}
-                  </div>
-                ) : (
-                  <div className="setup-server-grid">
-                    {discoveredServers.map((server) => (
-                      <button
-                        type="button"
-                        key={`${server.address}:${server.port}`}
-                        className={`setup-server-card${serverUrl === server.url ? " selected" : ""}`}
-                        onClick={() => setServerUrl(server.url)}
-                        disabled={isConnected}
-                      >
-                        <span className="setup-server-name">{server.name}</span>
-                        <span className="setup-server-addr">{server.url}</span>
-                        {serverLatencies.has(server.url) && (
-                          <span className="setup-server-ping">{serverLatencies.get(server.url)} ms</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Server URL */}
-            <div className="setup-section">
-              <label className="setup-field-label">Server Address</label>
-              <input
-                value={serverUrl}
-                onChange={(e) => setServerUrl(e.target.value)}
-                disabled={isConnected}
-                placeholder="http://192.168.1.x:47315"
-              />
-            </div>
-
-            {/* Recent servers as compact pills */}
-            {role === "viewer" && !isConnected && recentServers.length > 0 && (
-              <div className="setup-section">
-                <div className="section-label">Recent</div>
-                <div className="setup-recent-list">
-                  {recentServers.map((item) => (
-                    <button
-                      type="button"
-                      key={item}
-                      className={`setup-recent-pill${serverUrl === item ? " selected" : ""}`}
-                      onClick={() => setServerUrl(item)}
-                      disabled={isConnected}
-                    >
-                      {extractServerLabel(item)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Host-only: capture mode + frame rate */}
-            {role === "host" && (
-              <div className="setup-section">
-                <label className="setup-field-label">Capture Mode</label>
-                <div className="role-tabs">
-                  <button type="button" className={`role-tab ${captureMode === "desktop" ? "active" : ""}`} onClick={() => setCaptureMode("desktop")} disabled={isConnected}>Desktop</button>
-                  <button type="button" className={`role-tab ${captureMode === "game" ? "active" : ""}`} onClick={() => setCaptureMode("game")} disabled={isConnected}>Game</button>
-                </div>
-              </div>
-            )}
-            {role === "host" && (
-              <div className="setup-section">
-                <label className="setup-field-label">Frame Rate</label>
-                <select value={frameRate} onChange={(e) => setFrameRate(Number(e.target.value) as FrameRate)} disabled={isConnected}>
-                  <option value={15}>15 FPS — low bandwidth</option>
-                  <option value={30}>30 FPS — balanced</option>
-                  <option value={60}>60 FPS — smooth / games</option>
-                </select>
-              </div>
-            )}
-
-            {/* Viewer settings — collapsible */}
-            {role === "viewer" && !isConnected && (
-              <div className="setup-section">
-                <button
-                  type="button"
-                  className="setup-settings-toggle"
-                  onClick={() => setIsSetupSettingsOpen((v) => !v)}
-                >
-                  <span>Connection Settings</span>
-                  <span className={`setup-settings-chevron${isSetupSettingsOpen ? " open" : ""}`}>▾</span>
-                </button>
-                {isSetupSettingsOpen && (
-                  <div className="setup-settings-body">
-                    <SettingsToggle
-                      checked={connectInFullscreen}
-                      onChange={changeConnectInFullscreen}
-                      label="Connect in fullscreen"
-                      sub="Enter fullscreen automatically after connecting"
-                    />
-                    <SettingsToggle
-                      checked={captureLocalInput}
-                      onChange={changeCaptureLocalInput}
-                      label="Capture local input"
-                      sub="Route all input to the remote PC"
-                    />
-                    <SettingsToggle
-                      checked={receiveStreamAudio}
-                      onChange={changeReceiveStreamAudio}
-                      label="Receive audio"
-                    />
-                    <div className="field">
-                      <label>Frame rate</label>
-                      <select
-                        value={viewerFrameRate}
-                        onChange={(event) => changeViewerFrameRate(Number(event.target.value) as FrameRate)}
-                      >
-                        <option value={15}>15 FPS — low bandwidth</option>
-                        <option value={30}>30 FPS — balanced</option>
-                        <option value={60}>60 FPS — smooth</option>
-                      </select>
-                    </div>
-                    <HotkeyField label="Switch monitor" value={switchMonitorShortcut} onChange={changeSwitchMonitorShortcut} />
-                    <HotkeyField label="Disconnect" value={disconnectShortcut} onChange={changeDisconnectShortcut} />
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-          )}
-
-
-          {peer && (
-            <>
-              <div className="divider" />
-              <div className="section">
-                <div className="section-label">Peer</div>
-                <div className="peer-badge">
-                  <div className="peer-badge-dot" />
-                  <span className="peer-badge-text">
-                    {peer.displayName ?? peer.role} connected
-                  </span>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-
-        {appMode !== "host" && (
-        <div className="sidebar-footer">
-          {isConnected ? (
-            <button type="button" className="connect-btn btn-danger" onClick={confirmAndDisconnect}>
-              Disconnect
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="connect-btn btn-primary"
-              onClick={() => void connect()}
-              disabled={!canConnect}
-            >
-              Connect
-            </button>
-          )}
-        </div>
-        )}
-      </aside>
-
-      {appMode !== "host" && (!isViewerMode || isConnected) && (
-        <section
-          className={`video-stage${role === "viewer" && isDraggingFile ? " drag-active" : ""}`}
-        >
-          <div className="video-overlay-header">
-            <div>
-              <div className="video-stage-title">
-                {role === "host" ? "Shared Desktop" : "Remote Desktop"}
-                {selectedSource && role === "host" ? ` · ${selectedSource.name}` : ""}
-              </div>
-              <div className="video-stage-sub">
-                {peer ? `${peer.displayName ?? peer.role} is connected` : "Waiting for peer…"}
-              </div>
-            </div>
-          </div>
-
-          {role === "viewer" && (
-            <div className={`video-drop-overlay${isDraggingFile ? " visible" : ""}`}>
-              <div className="video-drop-card">
-                <div className="video-drop-title">Drop files to transfer</div>
-                <div className="video-drop-sub">Release to send the file to the remote host</div>
-              </div>
-            </div>
-          )}
-
-          {role === "host" ? (
-            isConnected ? (
-              <video ref={localVideoRef} className="desktop-video" autoPlay muted playsInline />
-            ) : (
-              <VideoEmpty
-                icon="🖥️"
-                title="Ready to share"
-                sub={
-                  selectedSource
-                    ? `Will share "${selectedSource.name}" when connected`
-                    : "Select a capture source and connect"
-                }
-              />
-            )
-          ) : isConnected ? (
-            <>
-              <RemoteVideo
-                videoRef={remoteVideoRef}
-                controlEnabled={controlEnabled}
-                disconnectShortcut={disconnectShortcut}
-                inputCaptureEnabled={captureLocalInput && controlEnabled}
-                receiveAudio={receiveStreamAudio}
-                switchMonitorShortcut={switchMonitorShortcut}
-                onControl={sendControl}
-                onDisconnectShortcut={disconnect}
-                onInputCaptureChange={changeCaptureLocalInput}
-                onSwitchMonitorShortcut={switchToNextRemoteSource}
-                onToggleFullscreen={() => void toggleFullscreen()}
-              />
-              {captureLocalInput && controlEnabled && (
-                <div className="input-capture-hint">
-                  Input captured. Press Ctrl+Alt+Shift+Esc to exit.
-                </div>
-              )}
-              <ViewerSettingsOverlay
-                activeRemoteSourceId={activeRemoteSourceId}
-                captureLocalInput={captureLocalInput}
-                connectionStats={connectionStats}
-                connectInFullscreen={connectInFullscreen}
-                controlEnabled={controlEnabled}
-                disconnectShortcut={disconnectShortcut}
-                fileInputRef={fileInputRef}
-                frameRate={viewerFrameRate}
-                hostSources={hostSources}
-                isFullscreen={isFullscreen}
-                isHotkeysOpen={isHotkeysOpen}
-                isOpen={isViewerSettingsOpen}
-                receiveAudio={receiveStreamAudio}
-                saveDirectory={saveDirectory}
-                status={status}
-                switchMonitorShortcut={switchMonitorShortcut}
-                transferLabel={transferLabel}
-                transferProgress={transferProgress}
-                onChooseSaveDirectory={() => void chooseSaveDirectory()}
-                onClose={() => setIsViewerSettingsOpen(false)}
-                onDisconnect={confirmAndDisconnect}
-                onFileInputChange={handleFileInputChange}
-                onSelectFile={() => fileInputRef.current?.click()}
-                onToggleConnectInFullscreen={changeConnectInFullscreen}
-                onToggleCaptureLocalInput={changeCaptureLocalInput}
-                onSwitchRemoteSource={switchRemoteSource}
-                onToggle={() => setIsViewerSettingsOpen((value) => !value)}
-                onToggleControl={changeControlEnabled}
-                onToggleFullscreen={() => void toggleFullscreen()}
-                onChangeFrameRate={changeViewerFrameRate}
-                onChangeDisconnectShortcut={changeDisconnectShortcut}
-                onChangeSwitchMonitorShortcut={changeSwitchMonitorShortcut}
-                onToggleReceiveAudio={changeReceiveStreamAudio}
-              />
-              {isHotkeysOpen && (
-                <HotkeysPanel
-                  disconnectShortcut={disconnectShortcut}
-                  switchMonitorShortcut={switchMonitorShortcut}
-                  onClose={() => setIsHotkeysOpen(false)}
-                />
-              )}
-            </>
-          ) : (
-            <VideoEmpty
-              icon="SCREEN"
-              title="Remote Desktop"
-              sub="Enter the session code and connect to the host"
-            />
-          )}
-        </section>
-      )}
-    </div>
-  );
-}
-
-function ServerStatusBadge({ status }: { status: EmbeddedBackendStatus["status"] }): ReactElement {
-  const map: Record<EmbeddedBackendStatus["status"], { label: string; cls: string }> = {
-    running:  { label: "Running",  cls: "badge-running"  },
-    starting: { label: "Starting", cls: "badge-starting" },
-    stopped:  { label: "Stopped",  cls: "badge-stopped"  },
-    error:    { label: "Error",    cls: "badge-error"    },
-    disabled: { label: "Disabled", cls: "badge-stopped"  }
-  };
-  const { label, cls } = map[status];
-  return <span className={`server-badge ${cls}`}>{label}</span>;
-}
-
-function VideoEmpty({
-  icon,
-  title,
-  sub
-}: {
-  icon: string;
-  title: string;
-  sub: string;
-}): ReactElement {
-  return (
-    <div className="video-empty">
-      <div className="video-empty-icon">{icon}</div>
-      <div className="video-empty-title">{title}</div>
-      <div className="video-empty-sub">{sub}</div>
-    </div>
-  );
-}
-
-function HotkeyField({
-  label,
-  value,
-  onChange
-}: {
-  label: string;
-  value: string;
-  onChange: (shortcut: string) => void;
-}): ReactElement {
-  return (
-    <div className="field hotkey-field">
-      <label>{label}</label>
-      <div className="hotkey-input-row">
-        <input
-          readOnly
-          value={value}
-          placeholder="Click and press shortcut"
-          onKeyDown={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-
-            if (event.key === "Backspace" || event.key === "Delete") {
-              onChange("");
-              return;
-            }
-
-            const shortcut = hotkeyFromKeyboardEvent(event.nativeEvent);
-            if (shortcut) {
-              onChange(shortcut);
-            }
-          }}
-        />
-        <button type="button" className="btn-icon" onClick={() => onChange("")} aria-label={`Clear ${label}`}>
-          X
-        </button>
-      </div>
-    </div>
-  );
-}
-
-type SettingsTab = "control" | "stream" | "files";
-
-function SettingsToggle({
-  checked,
-  onChange,
-  label,
-  sub
-}: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  label: string;
-  sub?: string;
-}): ReactElement {
-  return (
-    <label className="settings-toggle-row">
-      <div className="settings-toggle-text">
-        <span className="settings-toggle-label">{label}</span>
-        {sub && <span className="settings-toggle-sub">{sub}</span>}
-      </div>
-      <div className="settings-switch">
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <span className="settings-switch-track" aria-hidden="true" />
-      </div>
-    </label>
-  );
-}
-
-function ViewerSettingsOverlay({
-  activeRemoteSourceId,
-  captureLocalInput,
-  connectionStats,
-  connectInFullscreen,
-  controlEnabled,
-  disconnectShortcut,
-  fileInputRef,
-  frameRate,
-  hostSources,
-  isFullscreen,
-  isHotkeysOpen,
-  isOpen,
-  receiveAudio,
-  saveDirectory,
-  status: _status,
-  switchMonitorShortcut,
-  transferLabel,
-  transferProgress,
-  onChooseSaveDirectory,
-  onClose,
-  onDisconnect,
-  onFileInputChange,
-  onSelectFile,
-  onSwitchRemoteSource,
-  onToggleCaptureLocalInput,
-  onToggleConnectInFullscreen,
-  onToggle,
-  onToggleControl,
-  onToggleFullscreen,
-  onChangeFrameRate,
-  onChangeDisconnectShortcut,
-  onChangeSwitchMonitorShortcut,
-  onToggleReceiveAudio
-}: {
-  activeRemoteSourceId?: string;
-  captureLocalInput: boolean;
-  connectionStats?: ConnectionStats;
-  connectInFullscreen: boolean;
-  controlEnabled: boolean;
-  disconnectShortcut: string;
-  fileInputRef: RefObject<HTMLInputElement | null>;
-  frameRate: FrameRate;
-  hostSources: HostSource[];
-  isFullscreen: boolean;
-  isHotkeysOpen: boolean;
-  isOpen: boolean;
-  receiveAudio: boolean;
-  saveDirectory: string;
-  status: string;
-  switchMonitorShortcut: string;
-  transferLabel?: string;
-  transferProgress?: number;
-  onChooseSaveDirectory: () => void;
-  onClose: () => void;
-  onDisconnect: () => void;
-  onFileInputChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onSelectFile: () => void;
-  onSwitchRemoteSource: (sourceId: string) => void;
-  onToggleCaptureLocalInput: (enabled: boolean) => void;
-  onToggleConnectInFullscreen: (enabled: boolean) => void;
-  onToggle: () => void;
-  onToggleControl: (enabled: boolean) => void;
-  onToggleFullscreen: () => void;
-  onChangeFrameRate: (frameRate: FrameRate) => void;
-  onChangeDisconnectShortcut: (shortcut: string) => void;
-  onChangeSwitchMonitorShortcut: (shortcut: string) => void;
-  onToggleReceiveAudio: (enabled: boolean) => void;
-}): ReactElement {
-  const [position, setPosition] = useState<ViewerOverlayPosition>({ top: 14, right: 14 });
-  const [isHotkeysHintOpen, setIsHotkeysHintOpen] = useState(false);
-  const [tab, setTab] = useState<SettingsTab>("control");
-  const dragRef = useRef<ViewerOverlayDragState | undefined>(undefined);
-  const skipNextClickRef = useRef(false);
-  const showHotkeysHint = isHotkeysHintOpen && !isHotkeysOpen && !isOpen;
-
-  useEffect(() => {
-    const handleResize = (): void => {
-      setPosition((current) => clampViewerOverlayPosition(current));
-    };
-
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
-  function handlePointerDown(event: React.PointerEvent<HTMLButtonElement>): void {
-    if (event.button !== 0) {
-      return;
-    }
-
-    dragRef.current = {
-      moved: false,
-      pointerId: event.pointerId,
-      startRight: position.right,
-      startTop: position.top,
-      startX: event.clientX,
-      startY: event.clientY
-    };
-    setIsHotkeysHintOpen(false);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handlePointerMove(event: React.PointerEvent<HTMLButtonElement>): void {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-
-    const deltaX = event.clientX - drag.startX;
-    const deltaY = event.clientY - drag.startY;
-    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
-      drag.moved = true;
-      setIsHotkeysHintOpen(false);
-    }
-
-    if (!drag.moved) {
-      return;
-    }
-
-    event.preventDefault();
-    setPosition(clampViewerOverlayPosition({
-      top: drag.startTop + deltaY,
-      right: drag.startRight - deltaX
-    }));
-  }
-
-  function handlePointerUp(event: React.PointerEvent<HTMLButtonElement>): void {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-
-    if (drag.moved) {
-      event.preventDefault();
-      event.stopPropagation();
-      skipNextClickRef.current = true;
-    }
-
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    dragRef.current = undefined;
-  }
-
-  function handleOverlayClick(event: React.MouseEvent<HTMLButtonElement>): void {
-    if (skipNextClickRef.current) {
-      skipNextClickRef.current = false;
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-
-    onToggle();
-    setIsHotkeysHintOpen(false);
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        className={`viewer-overlay-toggle${isOpen ? " active" : ""}`}
-        style={{ top: position.top, right: position.right }}
-        onClick={handleOverlayClick}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onMouseEnter={() => setIsHotkeysHintOpen(true)}
-        onMouseLeave={() => setIsHotkeysHintOpen(false)}
-        onFocus={() => setIsHotkeysHintOpen(true)}
-        onBlur={() => setIsHotkeysHintOpen(false)}
-        aria-label="Open viewer settings"
-      >
-        ⚙
-      </button>
-
-      {showHotkeysHint && (
-        <HotkeysPanel
-          disconnectShortcut={disconnectShortcut}
-          switchMonitorShortcut={switchMonitorShortcut}
-          variant="popover"
-          style={getViewerHotkeysPanelStyle(position)}
-        />
-      )}
-
-      {isOpen && (
-        <div
-          className="viewer-settings-panel"
-          style={getViewerSettingsPanelStyle(position)}
-          role="dialog"
-          aria-label="Viewer settings"
-        >
-          <div className="viewer-settings-header">
-            <div className="viewer-settings-title-row">
-              <div>
-                <div className="section-label">Remote Control</div>
-                <h2>Settings</h2>
-              </div>
-              <button type="button" className="btn-icon" onClick={onClose} aria-label="Close settings">
-                ✕
-              </button>
-            </div>
-            {connectionStats && (
-              <div className="viewer-stats-bar">
-                <div className="viewer-stat">
-                  <span className="viewer-stat-label">Ping</span>
-                  <strong>{formatLatency(connectionStats.latencyMs)}</strong>
-                </div>
-                <div className="viewer-stat-sep" />
-                <div className="viewer-stat">
-                  <span className="viewer-stat-label">Video</span>
-                  <strong>{formatBitrate(connectionStats.videoBitrateKbps)}</strong>
-                </div>
-                <div className="viewer-stat-sep" />
-                <div className="viewer-stat">
-                  <span className="viewer-stat-label">Audio</span>
-                  <strong>{formatBitrate(connectionStats.audioBitrateKbps)}</strong>
-                </div>
-                <div className="viewer-stat-sep" />
-                <div className="viewer-stat">
-                  <span className="viewer-stat-label">Loss</span>
-                  <strong className={connectionStats.packetLossPercent != null && connectionStats.packetLossPercent > 2 ? "stat-warn" : ""}>
-                    {formatPacketLoss(connectionStats.packetLossPercent, connectionStats.packetsLost)}
-                  </strong>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="viewer-settings-tabs" role="tablist">
-            {(["control", "stream", "files"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                role="tab"
-                aria-selected={tab === t}
-                className={`viewer-settings-tab${tab === t ? " active" : ""}`}
-                onClick={() => setTab(t)}
-              >
-                {t === "control" ? "Control" : t === "stream" ? "Stream" : "Files"}
-              </button>
-            ))}
-          </div>
-
-          <div className="viewer-settings-body" role="tabpanel">
-            {tab === "control" && (
-              <>
-                <SettingsToggle
-                  checked={controlEnabled}
-                  onChange={onToggleControl}
-                  label="Take control"
-                  sub="Send mouse and keyboard input to the host"
-                />
-                <SettingsToggle
-                  checked={captureLocalInput}
-                  onChange={onToggleCaptureLocalInput}
-                  label="Capture local input"
-                  sub="All input routed to remote PC. Press Ctrl+Alt+Shift+Esc to exit."
-                />
-                <div className="settings-group-label">Shortcuts</div>
-                <HotkeyField
-                  label="Disconnect"
-                  value={disconnectShortcut}
-                  onChange={onChangeDisconnectShortcut}
-                />
-                <HotkeyField
-                  label="Switch monitor"
-                  value={switchMonitorShortcut}
-                  onChange={onChangeSwitchMonitorShortcut}
-                />
-              </>
-            )}
-
-            {tab === "stream" && (
-              <>
-                <SettingsToggle
-                  checked={receiveAudio}
-                  onChange={onToggleReceiveAudio}
-                  label="Receive audio"
-                  sub="Play audio from the remote stream"
-                />
-                <SettingsToggle
-                  checked={connectInFullscreen}
-                  onChange={onToggleConnectInFullscreen}
-                  label="Connect in fullscreen"
-                  sub="Enter fullscreen automatically after connecting"
-                />
-                <div className="field">
-                  <label>Frame rate</label>
-                  <select
-                    value={frameRate}
-                    onChange={(event) => onChangeFrameRate(Number(event.target.value) as FrameRate)}
-                  >
-                    <option value={15}>15 FPS — low bandwidth</option>
-                    <option value={30}>30 FPS — balanced</option>
-                    <option value={60}>60 FPS — smooth</option>
-                  </select>
-                </div>
-                {hostSources.length > 1 && (
-                  <div className="field">
-                    <label>Monitor</label>
-                    <select
-                      value={activeRemoteSourceId ?? ""}
-                      onChange={(event) => onSwitchRemoteSource(event.target.value)}
-                    >
-                      {hostSources.map((source) => (
-                        <option key={source.id} value={source.id}>
-                          {source.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </>
-            )}
-
-            {tab === "files" && (
-              <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={onFileInputChange}
-                />
-                <button type="button" className="settings-action-btn" onClick={onSelectFile}>
-                  Send File to Host
-                </button>
-                <div className="settings-inline-row">
-                  <button type="button" className="secondary-action" onClick={onChooseSaveDirectory}>
-                    Receive Folder
-                  </button>
-                  <span className="path-hint" title={saveDirectory}>{saveDirectory || "Not set"}</span>
-                </div>
-                {transferLabel && (
-                  <div className="transfer-status">
-                    <div className="transfer-meta">
-                      <span className="transfer-name">{transferLabel}</span>
-                      <span className="transfer-percent">{transferProgress ?? 0}%</span>
-                    </div>
-                    <div className="transfer-bar">
-                      <div
-                        className="transfer-bar-fill"
-                        style={{ width: `${transferProgress ?? 0}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-                <div className="drop-hint">Drag files onto the remote screen to send them to the host.</div>
-              </>
-            )}
-          </div>
-
-          <div className="viewer-settings-footer">
-            <button type="button" className="secondary-action" onClick={onToggleFullscreen}>
-              {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-            </button>
-            <button type="button" className="connect-btn btn-danger" onClick={onDisconnect}>
-              Disconnect
-            </button>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-function clampViewerOverlayPosition(position: ViewerOverlayPosition): ViewerOverlayPosition {
-  const maxTop = Math.max(viewerOverlayMargin, window.innerHeight - viewerOverlayButtonSize - viewerOverlayMargin);
-  const maxRight = Math.max(viewerOverlayMargin, window.innerWidth - viewerOverlayButtonSize - viewerOverlayMargin);
-
-  return {
-    top: clamp(position.top, viewerOverlayMargin, maxTop),
-    right: clamp(position.right, viewerOverlayMargin, maxRight)
-  };
-}
-
-function getViewerSettingsPanelStyle(position: ViewerOverlayPosition): CSSProperties {
-  const right = getViewerPanelRight(position, viewerSettingsPanelWidth);
-  const belowTop = position.top + viewerOverlayButtonSize + viewerOverlayGap;
-  const availableBelow = window.innerHeight - belowTop - viewerOverlayMargin;
-  const availableAbove = position.top - viewerOverlayGap - viewerOverlayMargin;
-
-  if (availableBelow >= 320 || availableBelow >= availableAbove) {
-    return {
-      top: belowTop,
-      right,
-      maxHeight: `calc(100vh - ${belowTop + viewerOverlayMargin}px)`
-    };
-  }
-
-  return {
-    bottom: window.innerHeight - position.top + viewerOverlayGap,
-    right,
-    maxHeight: Math.max(180, availableAbove)
-  };
-}
-
-function getViewerHotkeysPanelStyle(position: ViewerOverlayPosition): CSSProperties {
-  const right = getViewerPanelRight(position, viewerHotkeysPanelWidth);
-  const belowTop = position.top + viewerOverlayButtonSize + viewerOverlayGap;
-  const availableBelow = window.innerHeight - belowTop - viewerOverlayMargin;
-  const availableAbove = position.top - viewerOverlayGap - viewerOverlayMargin;
-
-  if (availableBelow >= 180 || availableBelow >= availableAbove) {
-    return {
-      top: belowTop,
-      right
-    };
-  }
-
-  return {
-    bottom: window.innerHeight - position.top + viewerOverlayGap,
-    right
-  };
-}
-
-function getViewerPanelRight(position: ViewerOverlayPosition, preferredWidth: number): number {
-  const availableWidth = Math.max(0, window.innerWidth - viewerPanelSafeMargin * 2);
-  const panelWidth = Math.min(preferredWidth, availableWidth);
-  const maxRight = Math.max(viewerPanelSafeMargin, window.innerWidth - panelWidth - viewerPanelSafeMargin);
-  return clamp(position.right, viewerPanelSafeMargin, maxRight);
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function RemoteVideo({
-  videoRef,
-  controlEnabled,
-  disconnectShortcut,
-  inputCaptureEnabled,
-  receiveAudio,
-  switchMonitorShortcut,
-  onControl,
-  onDisconnectShortcut,
-  onInputCaptureChange,
-  onSwitchMonitorShortcut,
-  onToggleFullscreen
-}: {
-  videoRef: RefObject<HTMLVideoElement | null>;
-  controlEnabled: boolean;
-  disconnectShortcut: string;
-  inputCaptureEnabled: boolean;
-  receiveAudio: boolean;
-  switchMonitorShortcut: string;
-  onControl: (message: ControlMessage) => void;
-  onDisconnectShortcut: () => void;
-  onInputCaptureChange: (enabled: boolean) => void;
-  onSwitchMonitorShortcut: () => void;
-  onToggleFullscreen: () => void;
-}): ReactElement {
-  const virtualPointerRef = useRef({
-    x: 0,
-    y: 0,
-    screenWidth: 0,
-    screenHeight: 0
-  });
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) {
-      return;
-    }
-
-    video.muted = !receiveAudio;
-    video.volume = receiveAudio ? 1 : 0;
-  }, [receiveAudio, videoRef]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!controlEnabled || !inputCaptureEnabled || !video) {
-      return;
-    }
-
-    const screenWidth = video.videoWidth || Math.round(video.getBoundingClientRect().width);
-    const screenHeight = video.videoHeight || Math.round(video.getBoundingClientRect().height);
-    virtualPointerRef.current = {
-      x: Math.round(screenWidth / 2),
-      y: Math.round(screenHeight / 2),
-      screenWidth,
-      screenHeight
-    };
-
-    video.focus();
-    try {
-      video.requestPointerLock();
-    } catch {
-      // Pointer lock can require a user gesture in some environments.
-    }
-
-    const keyboard = navigator as Navigator & {
-      keyboard?: {
-        lock?: () => Promise<void>;
-        unlock?: () => void;
-      };
-    };
-    void keyboard.keyboard?.lock?.();
-
-    const handlePointerMove = (event: MouseEvent): void => {
-      if (document.pointerLockElement !== video) {
-        return;
-      }
-
-      const current = virtualPointerRef.current;
-      const next = {
-        x: clamp(current.x + event.movementX, 0, current.screenWidth),
-        y: clamp(current.y + event.movementY, 0, current.screenHeight),
-        screenWidth: current.screenWidth,
-        screenHeight: current.screenHeight
-      };
-      virtualPointerRef.current = next;
-      onControl({ kind: "pointer", event: { type: "move", ...next } });
-    };
-
-    const handleWheel = (event: WheelEvent): void => {
-      event.preventDefault();
-      onControl({ kind: "pointer", event: { type: "scroll", deltaX: event.deltaX, deltaY: event.deltaY } });
-    };
-
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (isInputCaptureExitShortcut(event)) {
-        onInputCaptureChange(false);
-        return;
-      }
-      if (isKeyboardShortcut(event, disconnectShortcut)) {
-        onDisconnectShortcut();
-        return;
-      }
-      if (isKeyboardShortcut(event, switchMonitorShortcut)) {
-        onSwitchMonitorShortcut();
-        return;
-      }
-
-      if (!event.repeat) {
-        onControl({ kind: "keyboard", event: { type: "keyDown", code: event.code, key: event.key } });
-      }
-    };
-
-    const handleKeyUp = (event: KeyboardEvent): void => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (isInputCaptureExitShortcut(event)) {
-        return;
-      }
-
-      onControl({ kind: "keyboard", event: { type: "keyUp", code: event.code, key: event.key } });
-    };
-
-    const handlePointerLockChange = (): void => {
-      if (document.pointerLockElement !== video) {
-        onInputCaptureChange(false);
-      }
-    };
-
-    document.addEventListener("mousemove", handlePointerMove);
-    document.addEventListener("pointerlockchange", handlePointerLockChange);
-    window.addEventListener("wheel", handleWheel, { passive: false });
-    window.addEventListener("keydown", handleKeyDown, true);
-    window.addEventListener("keyup", handleKeyUp, true);
-
-    return () => {
-      document.removeEventListener("mousemove", handlePointerMove);
-      document.removeEventListener("pointerlockchange", handlePointerLockChange);
-      window.removeEventListener("wheel", handleWheel);
-      window.removeEventListener("keydown", handleKeyDown, true);
-      window.removeEventListener("keyup", handleKeyUp, true);
-      keyboard.keyboard?.unlock?.();
-      if (document.pointerLockElement === video) {
-        document.exitPointerLock();
-      }
-    };
-  }, [
-    controlEnabled,
-    disconnectShortcut,
-    inputCaptureEnabled,
-    onControl,
-    onDisconnectShortcut,
-    onInputCaptureChange,
-    onSwitchMonitorShortcut,
-    switchMonitorShortcut,
-    videoRef
-  ]);
-
-  function pointerPosition(event: React.PointerEvent<HTMLVideoElement>): {
-    x: number;
-    y: number;
-    screenWidth: number;
-    screenHeight: number;
-  } {
-    const video = event.currentTarget;
-    const rect = video.getBoundingClientRect();
-    const screenWidth = video.videoWidth || Math.round(rect.width);
-    const screenHeight = video.videoHeight || Math.round(rect.height);
-
-    return {
-      x: Math.round(((event.clientX - rect.left) / rect.width) * screenWidth),
-      y: Math.round(((event.clientY - rect.top) / rect.height) * screenHeight),
-      screenWidth,
-      screenHeight
-    };
-  }
-
-  return (
-    <video
-      ref={videoRef}
-      className={`desktop-video interactive${controlEnabled ? "" : " control-disabled"}${inputCaptureEnabled ? " input-captured" : ""}`}
-      autoPlay
-      playsInline
-      muted={!receiveAudio}
-      tabIndex={controlEnabled ? 0 : -1}
-      onDoubleClick={() => onToggleFullscreen()}
-      onContextMenu={(event) => event.preventDefault()}
-      onPointerMove={(event) => {
-        if (!controlEnabled || inputCaptureEnabled) return;
-        onControl({ kind: "pointer", event: { type: "move", ...pointerPosition(event) } });
-      }}
-      onPointerDown={(event) => {
-        if (!controlEnabled) return;
-        event.currentTarget.focus();
-        if (inputCaptureEnabled && document.pointerLockElement !== event.currentTarget) {
-          try {
-            event.currentTarget.requestPointerLock();
-          } catch {
-            // Pointer lock can require a user gesture in some environments.
-          }
-        }
-        event.currentTarget.setPointerCapture(event.pointerId);
-        const pointer = inputCaptureEnabled ? virtualPointerRef.current : pointerPosition(event);
-        onControl({
-          kind: "pointer",
-          event: { type: "click", button: mapPointerButton(event.button), ...pointer }
-        });
-      }}
-      onWheel={(event) => {
-        if (!controlEnabled || inputCaptureEnabled) return;
-        onControl({ kind: "pointer", event: { type: "scroll", deltaX: event.deltaX, deltaY: event.deltaY } });
-      }}
-      onKeyDown={(event) => {
-        if (!controlEnabled || inputCaptureEnabled) return;
-        if (isKeyboardShortcut(event.nativeEvent, disconnectShortcut)) {
-          event.preventDefault();
-          onDisconnectShortcut();
-          return;
-        }
-        if (isKeyboardShortcut(event.nativeEvent, switchMonitorShortcut)) {
-          event.preventDefault();
-          onSwitchMonitorShortcut();
-          return;
-        }
-        if (event.repeat) return;
-        onControl({ kind: "keyboard", event: { type: "keyDown", code: event.code, key: event.key } });
-      }}
-      onKeyUp={(event) => {
-        if (!controlEnabled || inputCaptureEnabled) return;
-        onControl({ kind: "keyboard", event: { type: "keyUp", code: event.code, key: event.key } });
-      }}
-    />
-  );
-}
-
-function mapPointerButton(button: number): "left" | "middle" | "right" {
-  if (button === 1) return "middle";
-  if (button === 2) return "right";
-  return "left";
-}
-
-function isInputCaptureExitShortcut(event: KeyboardEvent): boolean {
-  return event.ctrlKey && event.altKey && event.shiftKey && event.code === "Escape";
-}
-
-function isKeyboardShortcut(event: KeyboardEvent, shortcut: string): boolean {
-  const current = hotkeyFromKeyboardEvent(event);
-  return Boolean(current && normalizeHotkey(current) === normalizeHotkey(shortcut));
-}
-
-function hotkeyFromKeyboardEvent(event: KeyboardEvent): string | undefined {
-  const key = hotkeyKeyLabel(event);
-  if (!key) {
-    return undefined;
-  }
-
-  const parts: string[] = [];
-  if (event.ctrlKey) parts.push("Ctrl");
-  if (event.altKey) parts.push("Alt");
-  if (event.shiftKey) parts.push("Shift");
-  if (event.metaKey) parts.push("Meta");
-  parts.push(key);
-  return parts.join("+");
-}
-
-function hotkeyKeyLabel(event: KeyboardEvent): string | undefined {
-  if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) {
-    return undefined;
-  }
-
-  if (event.code.startsWith("Key")) {
-    return event.code.slice(3).toUpperCase();
-  }
-
-  if (event.code.startsWith("Digit")) {
-    return event.code.slice(5);
-  }
-
-  if (/^F\d{1,2}$/.test(event.code)) {
-    return event.code;
-  }
-
-  const map: Record<string, string> = {
-    Backquote: "`",
-    Backslash: "\\",
-    BracketLeft: "[",
-    BracketRight: "]",
-    Comma: ",",
-    Delete: "Delete",
-    End: "End",
-    Enter: "Enter",
-    Equal: "=",
-    Escape: "Esc",
-    Home: "Home",
-    Insert: "Insert",
-    Minus: "-",
-    PageDown: "PageDown",
-    PageUp: "PageUp",
-    Period: ".",
-    Quote: "'",
-    Semicolon: ";",
-    Slash: "/",
-    Space: "Space",
-    Tab: "Tab"
-  };
-
-  return map[event.code] ?? event.key;
-}
-
-function normalizeHotkey(shortcut: string): string {
-  return shortcut.replace(/\s+/g, "").replace(/\bEsc\b/gi, "Escape").toLowerCase();
-}
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
-
-  return Boolean(
-    target.closest("input, textarea, select") ||
-    target.isContentEditable
-  );
-}
-
-function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
-  return Array.from(dataTransfer.types).includes("Files");
-}
-
-function HotkeysPanel({
-  disconnectShortcut,
-  switchMonitorShortcut,
-  onClose,
-  style,
-  variant = "dialog"
-}: {
-  disconnectShortcut: string;
-  switchMonitorShortcut: string;
-  onClose?: () => void;
-  style?: CSSProperties;
-  variant?: "dialog" | "popover";
-}): ReactElement {
-  const rows: [string, string][] = [
-    [disconnectShortcut, "Disconnect"],
-    [switchMonitorShortcut, "Switch monitor"],
-    ["Ctrl+Alt+Shift+Esc", "Exit input capture"],
-    ["F11", "Toggle fullscreen"],
-    ["?", "Show / hide shortcuts"],
-  ];
-
-  return (
-    <div
-      className={`hotkeys-panel${variant === "popover" ? " hotkeys-panel-popover" : ""}`}
-      role={variant === "popover" ? "tooltip" : "dialog"}
-      aria-label="Keyboard shortcuts"
-      style={style}
-    >
-      <div className="hotkeys-header">
-        <span className="section-label" style={{ margin: 0 }}>Keyboard Shortcuts</span>
-        {onClose && (
-          <button type="button" className="btn-icon" onClick={onClose} aria-label="Close">X</button>
-        )}
-      </div>
-      <div className="hotkeys-body">
-        {rows.map(([keys, label]) => (
-          <div key={label} className="hotkeys-row">
-            <kbd className="hotkeys-kbd">{keys}</kbd>
-            <span className="hotkeys-label">{label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function HostSettingsPage(): ReactElement {
-  const [saveDirectory, setSaveDirectory] = useState("");
-  const [launchOnStartup, setLaunchOnStartup] = useState(false);
-  const [requireViewerApproval, setRequireViewerApproval] = useState(true);
-  const [hostAccessPassword, setHostAccessPassword] = useState("");
-  const [hostAccessPasswordSet, setHostAccessPasswordSet] = useState(false);
-  const [hostAccessPasswordDirty, setHostAccessPasswordDirty] = useState(false);
-  const [status, setStatus] = useState("");
-
-  useEffect(() => {
-    void window.remoteControl.getFileSettings().then((s) => setSaveDirectory(s.saveDirectory));
-    void window.remoteControl.getLaunchSettings().then((s) => setLaunchOnStartup(s.launchOnStartup));
-    void window.remoteControl.getHostAccessSettings().then((s) => {
-      setHostAccessPassword(s.accessPassword);
-      setHostAccessPasswordSet(s.accessPasswordSet);
-      setRequireViewerApproval(s.requireViewerApproval);
-      setHostAccessPasswordDirty(false);
-    });
-  }, []);
-
-  async function chooseSaveDirectory(): Promise<void> {
-    const result = await window.remoteControl.chooseSaveDirectory();
-    if (result.path) setSaveDirectory(result.path);
-    if (result.error) setStatus(result.error);
-  }
-
-  async function changeLaunchOnStartup(enabled: boolean): Promise<void> {
-    setLaunchOnStartup(enabled);
-    const result = await window.remoteControl.setLaunchOnStartup(enabled);
-    if (!result.ok) {
-      setLaunchOnStartup(!enabled);
-      if (result.error) setStatus(result.error);
-    }
-  }
-
-  async function changeHostAccessPassword(password: string): Promise<void> {
-    const result = await window.remoteControl.setHostAccessPassword(password);
-    if (result.ok) {
-      setHostAccessPassword(result.accessPassword ?? "");
-      setHostAccessPasswordSet(Boolean(result.accessPasswordSet));
-      setHostAccessPasswordDirty(false);
-      setStatus(result.accessPasswordSet ? "Server password updated" : "Server password cleared");
-    } else if (result.error) {
-      setStatus(result.error);
-    }
-  }
-
-  async function changeRequireViewerApproval(enabled: boolean): Promise<void> {
-    setRequireViewerApproval(enabled);
-    const result = await window.remoteControl.setRequireViewerApproval(enabled);
-    if (result.ok) {
-      setRequireViewerApproval(result.requireViewerApproval ?? enabled);
-      setStatus(enabled ? "Viewer approval required" : "Viewer approval disabled");
-      return;
-    }
-
-    setRequireViewerApproval(!enabled);
-    if (result.error) {
-      setStatus(result.error);
-    }
-  }
-
-  return (
-    <div className="settings-page">
-      <div className="settings-page-header">
-        <div className="section-label">Host</div>
-        <h2>Settings</h2>
-      </div>
-
-      {status && <div className="settings-page-status">{status}</div>}
-
-      <div className="settings-page-body">
-        <div className="field">
-          <label>Incoming Files</label>
-          <button type="button" onClick={() => void chooseSaveDirectory()}>
-            Choose Folder
-          </button>
-          <div className="path-hint" title={saveDirectory}>{saveDirectory}</div>
-        </div>
-
-        <label className="toggle-field compact-toggle">
-          <input
-            type="checkbox"
-            checked={launchOnStartup}
-            onChange={(event) => void changeLaunchOnStartup(event.target.checked)}
-          />
-          <span>
-            <strong>Launch at startup</strong>
-            <small>Start host app when Windows starts</small>
-          </span>
-        </label>
-
-        <label className="toggle-field compact-toggle">
-          <input
-            type="checkbox"
-            checked={requireViewerApproval}
-            onChange={(event) => void changeRequireViewerApproval(event.target.checked)}
-          />
-          <span>
-            <strong>Require viewer approval</strong>
-            <small>Ask on this host before allowing a client to connect</small>
-          </span>
-        </label>
-
-        <div className="field">
-          <label>Server Password</label>
-          <input
-            type="password"
-            value={hostAccessPassword}
-            onChange={(event) => {
-              setHostAccessPassword(event.target.value);
-              setHostAccessPasswordDirty(true);
-            }}
-            onBlur={() => {
-              if (hostAccessPasswordDirty) {
-                void changeHostAccessPassword(hostAccessPassword);
-              }
-            }}
-            placeholder={hostAccessPasswordSet ? "Password is set" : "No password"}
-          />
-          {hostAccessPasswordSet && (
-            <button type="button" className="secondary-action" onClick={() => void changeHostAccessPassword("")}>
-              Clear Password
-            </button>
-          )}
-          <div className="drop-hint">
-            {hostAccessPasswordSet
-              ? "A password is configured. Enter a new password to replace it."
-              : "Viewers will be asked for this password before joining."}
-          </div>
-        </div>
-      </div>
+      <AppOverlays
+        isHostFileDropVisible={role === "host" && isDraggingFile && isConnected && Boolean(peer)}
+        passwordPrompt={passwordPrompt}
+        receivedFileNotice={receivedFileNotice}
+        viewerApprovalPrompt={viewerApprovalPrompt}
+        onCloseReceivedFile={webRtc.clearReceivedFileNotice}
+        onOpenReceivedFolder={(path) => void openReceivedFolder(path)}
+        onPasswordChange={(password) => setPasswordPrompt((current) => current ? { ...current, password } : current)}
+        onResolvePassword={resolvePasswordPrompt}
+        onResolveViewerApproval={resolveViewerApproval}
+      />
+
+      <AppSidebar
+        appMode={appMode}
+        backendStatus={backendStatus}
+        canConnect={canConnect}
+        captureLocalInput={captureLocalInput}
+        captureMode={captureMode}
+        connectInFullscreen={connectInFullscreen}
+        disconnectShortcut={disconnectShortcut}
+        discoveredServers={discoveredServers}
+        fileInputRef={fileInputRef}
+        frameRate={frameRate}
+        isConnected={isConnected}
+        isDiscovering={isDiscovering}
+        isSetupSettingsOpen={isSetupSettingsOpen}
+        peer={peer}
+        receiveStreamAudio={receiveStreamAudio}
+        recentServers={recentServers}
+        role={role}
+        serverLatencies={serverLatencies}
+        serverUrl={serverUrl}
+        status={status}
+        switchMonitorShortcut={switchMonitorShortcut}
+        transferLabel={transferLabel}
+        transferProgress={transferProgress}
+        viewerFrameRate={viewerFrameRate}
+        onCaptureLocalInputChange={changeCaptureLocalInput}
+        onCaptureModeChange={setCaptureMode}
+        onConnect={() => void connect()}
+        onConnectInFullscreenChange={changeConnectInFullscreen}
+        onDisconnect={confirmAndDisconnect}
+        onDisconnectShortcutChange={changeDisconnectShortcut}
+        onFileInputChange={handleFileInputChange}
+        onFrameRateChange={setFrameRate}
+        onOpenHostSettings={() => void window.remoteControl.openHostSettings()}
+        onReceiveAudioChange={changeReceiveStreamAudio}
+        onScanServers={() => void scanServers()}
+        onSelectFile={() => fileInputRef.current?.click()}
+        onServerUrlChange={setServerUrl}
+        onSetupSettingsToggle={() => setIsSetupSettingsOpen((value) => !value)}
+        onSwitchMonitorShortcutChange={changeSwitchMonitorShortcut}
+        onViewerFrameRateChange={changeViewerFrameRate}
+      />
+
+      <VideoStage
+        activeRemoteSourceId={activeRemoteSourceId}
+        appMode={appMode}
+        captureLocalInput={captureLocalInput}
+        connectionStats={connectionStats}
+        connectInFullscreen={connectInFullscreen}
+        controlEnabled={controlEnabled}
+        disconnectShortcut={disconnectShortcut}
+        fileInputRef={fileInputRef}
+        hostSources={hostSources}
+        isConnected={isConnected}
+        isDraggingFile={isDraggingFile}
+        isFullscreen={isFullscreen}
+        isHotkeysOpen={isHotkeysOpen}
+        isViewerMode={isViewerMode}
+        isViewerSettingsOpen={isViewerSettingsOpen}
+        localVideoRef={localVideoRef}
+        peer={peer}
+        receiveStreamAudio={receiveStreamAudio}
+        remoteVideoRef={remoteVideoRef}
+        role={role}
+        saveDirectory={saveDirectory}
+        selectedSource={selectedSource}
+        switchMonitorShortcut={switchMonitorShortcut}
+        transferLabel={transferLabel}
+        transferProgress={transferProgress}
+        viewerFrameRate={viewerFrameRate}
+        onChangeDisconnectShortcut={changeDisconnectShortcut}
+        onChangeSwitchMonitorShortcut={changeSwitchMonitorShortcut}
+        onChooseSaveDirectory={() => void chooseSaveDirectory()}
+        onCloseHotkeys={() => setIsHotkeysOpen(false)}
+        onCloseViewerSettings={() => setIsViewerSettingsOpen(false)}
+        onControl={sendControl}
+        onDisconnect={confirmAndDisconnect}
+        onFileInputChange={handleFileInputChange}
+        onInputCaptureChange={changeCaptureLocalInput}
+        onSelectFile={() => fileInputRef.current?.click()}
+        onSwitchRemoteSource={switchRemoteSource}
+        onSwitchToNextRemoteSource={switchToNextRemoteSource}
+        onToggleCaptureLocalInput={changeCaptureLocalInput}
+        onToggleConnectInFullscreen={changeConnectInFullscreen}
+        onToggleControl={changeControlEnabled}
+        onToggleFullscreen={() => void toggleFullscreen()}
+        onToggleReceiveAudio={changeReceiveStreamAudio}
+        onToggleViewerSettings={() => setIsViewerSettingsOpen((value) => !value)}
+        onViewerFrameRateChange={changeViewerFrameRate}
+      />
     </div>
   );
 }
