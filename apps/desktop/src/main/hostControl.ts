@@ -29,7 +29,10 @@ let nutPromise: Promise<NutModule> | undefined;
 
 export async function applyHostControl(message: ControlMessage): Promise<void> {
   const nut = await loadNut();
+  await applyHostControlWithNut(nut, message);
+}
 
+export async function applyHostControlWithNut(nut: NutModule, message: ControlMessage): Promise<void> {
   if (message.kind === "pointer") {
     await applyPointerEvent(nut, message.event);
     return;
@@ -38,7 +41,7 @@ export async function applyHostControl(message: ControlMessage): Promise<void> {
   await applyKeyboardEvent(nut, message.event);
 }
 
-async function applyPointerEvent(nut: NutModule, event: ControlPointerEvent): Promise<void> {
+export async function applyPointerEvent(nut: NutModule, event: ControlPointerEvent): Promise<void> {
   if (event.type === "move") {
     await movePointer(nut, event.x, event.y);
     return;
@@ -66,7 +69,7 @@ async function applyPointerEvent(nut: NutModule, event: ControlPointerEvent): Pr
   }
 }
 
-async function applyKeyboardEvent(nut: NutModule, event: ControlKeyboardEvent): Promise<void> {
+export async function applyKeyboardEvent(nut: NutModule, event: ControlKeyboardEvent): Promise<void> {
   if (event.type === "typeText") {
     await nut.keyboard.type(event.text);
     return;
@@ -85,7 +88,7 @@ async function applyKeyboardEvent(nut: NutModule, event: ControlKeyboardEvent): 
   await nut.keyboard.releaseKey(key);
 }
 
-async function movePointer(nut: NutModule, x: number, y: number): Promise<void> {
+export async function movePointer(nut: NutModule, x: number, y: number): Promise<void> {
   const point = new nut.Point(Math.round(x), Math.round(y));
   if ("setPosition" in nut.mouse && typeof (nut.mouse as { setPosition?: unknown }).setPosition === "function") {
     await (nut.mouse as { setPosition: (p: unknown) => Promise<void> }).setPosition(point);
@@ -94,12 +97,12 @@ async function movePointer(nut: NutModule, x: number, y: number): Promise<void> 
   }
 }
 
-function mapMouseButton(nut: NutModule, button: "left" | "middle" | "right"): unknown {
+export function mapMouseButton(nut: NutModule, button: "left" | "middle" | "right"): unknown {
   const key = button.toUpperCase();
   return nut.Button[key] ?? nut.Button.LEFT;
 }
 
-function mapKeyboardKey(nut: NutModule, key: string, code: string): unknown {
+export function mapKeyboardKey(nut: NutModule, key: string, code: string): unknown {
   const normalized = code.replace(/^Key/, "").replace(/^Digit/, "");
   return nut.Key[normalized] ?? nut.Key[key.toUpperCase()] ?? nut.Key[key];
 }
@@ -114,12 +117,15 @@ function loadNut(): Promise<NutModule> {
   return nutPromise;
 }
 
-async function loadFirstAvailableNutModule(): Promise<NutModule> {
+export async function loadFirstAvailableNutModule(
+  importer: (specifier: string) => Promise<NutModule> = dynamicImport,
+  moduleCandidates: readonly string[] = nutModuleCandidates
+): Promise<NutModule> {
   const errors: string[] = [];
 
-  for (const moduleName of nutModuleCandidates) {
+  for (const moduleName of moduleCandidates) {
     try {
-      return await dynamicImport(moduleName);
+      return await importer(moduleName);
     } catch (error) {
       errors.push(`${moduleName}: ${error instanceof Error ? error.message : String(error)}`);
     }

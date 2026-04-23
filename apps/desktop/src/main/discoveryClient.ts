@@ -10,8 +10,31 @@ import {
   type DiscoveryResponse
 } from "@remote-control/shared";
 
-export async function discoverServers(timeoutMs = 1400): Promise<DiscoveredServer[]> {
-  const socket = createSocket("udp4");
+type DiscoverySocketLike = {
+  bind: (port: number, callback: () => void) => void;
+  close: () => void;
+  on: (event: "message", listener: (message: Buffer, remote: { address: string }) => void) => void;
+  send: (payload: Buffer, port: number, address: string) => void;
+  setBroadcast: (enabled: boolean) => void;
+};
+
+type DiscoverServersOptions = {
+  createSocket?: (type: "udp4") => DiscoverySocketLike;
+  getBroadcastAddresses?: () => string[];
+  now?: () => number;
+  scheduleTimeout?: (callback: () => void, timeoutMs: number) => void;
+};
+
+export async function discoverServers(
+  timeoutMs = 1400,
+  {
+    createSocket: createDiscoverySocket = createSocket,
+    getBroadcastAddresses: resolveBroadcastAddresses = getBroadcastAddresses,
+    now = Date.now,
+    scheduleTimeout = setTimeout
+  }: DiscoverServersOptions = {}
+): Promise<DiscoveredServer[]> {
+  const socket = createDiscoverySocket("udp4");
   const servers = new Map<string, DiscoveredServer>();
 
   const request: DiscoveryRequest = {
@@ -40,22 +63,22 @@ export async function discoverServers(timeoutMs = 1400): Promise<DiscoveredServe
         address,
         port: response.port,
         url,
-        lastSeen: Date.now()
+        lastSeen: now()
       });
     });
 
     socket.bind(0, () => {
       socket.setBroadcast(true);
-      for (const address of getBroadcastAddresses()) {
+      for (const address of resolveBroadcastAddresses()) {
         socket.send(payload, REMOTE_CONTROL_DISCOVERY_PORT, address);
       }
 
-      setTimeout(finish, timeoutMs);
+      scheduleTimeout(finish, timeoutMs);
     });
   });
 }
 
-function parseDiscoveryResponse(message: Buffer): DiscoveryResponse | undefined {
+export function parseDiscoveryResponse(message: Buffer): DiscoveryResponse | undefined {
   try {
     const parsed = JSON.parse(message.toString("utf8")) as Partial<DiscoveryResponse>;
     if (parsed.type === REMOTE_CONTROL_DISCOVERY_RESPONSE && parsed.version === 1 && parsed.port && parsed.name) {
@@ -68,10 +91,12 @@ function parseDiscoveryResponse(message: Buffer): DiscoveryResponse | undefined 
   return undefined;
 }
 
-function getBroadcastAddresses(): string[] {
+export function getBroadcastAddresses(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()
+): string[] {
   const addresses = new Set<string>(["127.0.0.1", "255.255.255.255"]);
 
-  for (const networkInterface of Object.values(networkInterfaces())) {
+  for (const networkInterface of Object.values(interfaces)) {
     for (const entry of networkInterface ?? []) {
       if (entry.family !== "IPv4" || entry.internal || !entry.netmask) {
         continue;
@@ -84,7 +109,7 @@ function getBroadcastAddresses(): string[] {
   return [...addresses];
 }
 
-function toBroadcastAddress(address: string, netmask: string): string {
+export function toBroadcastAddress(address: string, netmask: string): string {
   const addressParts = address.split(".").map(Number);
   const maskParts = netmask.split(".").map(Number);
   return addressParts.map((part, index) => (part | (~maskParts[index] & 255)) & 255).join(".");

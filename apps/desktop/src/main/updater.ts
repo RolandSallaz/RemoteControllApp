@@ -1,11 +1,62 @@
-import { app, dialog } from "electron";
-import electronUpdater from "electron-updater";
+import { createRequire } from "node:module";
 
-const { autoUpdater } = electronUpdater;
+const require = createRequire(import.meta.url);
 
-export function startAutoUpdate(appMode: "combined" | "host" | "viewer", isDev: boolean): void {
+type AppLike = {
+  isPackaged: boolean;
+};
+
+type DialogLike = {
+  showMessageBox: (options: {
+    type: "info";
+    buttons: string[];
+    defaultId: number;
+    cancelId: number;
+    title: string;
+    message: string;
+    detail: string;
+  }) => Promise<{ response: number }>;
+};
+
+type AutoUpdaterLike = {
+  channel?: string | null;
+  autoDownload: boolean;
+  autoInstallOnAppQuit: boolean;
+  on: (event: string, listener: (...args: unknown[]) => void | Promise<void>) => void;
+  checkForUpdatesAndNotify: () => Promise<unknown> | unknown;
+  quitAndInstall: () => void;
+};
+
+type LoggerLike = {
+  log: (message: string) => void;
+  error: (message: string) => void;
+};
+
+type UpdateInfoLike = {
+  version: string;
+};
+
+type ConfigureAutoUpdateOptions = {
+  app: AppLike;
+  appMode: "combined" | "host" | "viewer";
+  autoUpdater: AutoUpdaterLike;
+  dialog: DialogLike;
+  isDev: boolean;
+  logger?: LoggerLike;
+  scheduleUpdateCheck?: (callback: () => void, delayMs: number) => unknown;
+};
+
+export function configureAutoUpdate({
+  app,
+  appMode,
+  autoUpdater,
+  dialog,
+  isDev,
+  logger = console,
+  scheduleUpdateCheck = setTimeout
+}: ConfigureAutoUpdateOptions): boolean {
   if (isDev || appMode === "combined" || !app.isPackaged) {
-    return;
+    return false;
   }
 
   autoUpdater.channel = appMode === "host" ? "server" : "client";
@@ -13,22 +64,25 @@ export function startAutoUpdate(appMode: "combined" | "host" | "viewer", isDev: 
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("checking-for-update", () => {
-    console.log(`[updater] checking for updates on channel "${autoUpdater.channel}"`);
+    logger.log(`[updater] checking for updates on channel "${autoUpdater.channel}"`);
   });
 
   autoUpdater.on("update-available", (info) => {
-    console.log(`[updater] update available: ${info.version}`);
+    const updateInfo = info as UpdateInfoLike;
+    logger.log(`[updater] update available: ${updateInfo.version}`);
   });
 
   autoUpdater.on("update-not-available", () => {
-    console.log("[updater] no updates available");
+    logger.log("[updater] no updates available");
   });
 
   autoUpdater.on("error", (error) => {
-    console.error(`[updater] ${error.message}`);
+    const updateError = error as Error;
+    logger.error(`[updater] ${updateError.message}`);
   });
 
   autoUpdater.on("update-downloaded", async (info) => {
+    const updateInfo = info as UpdateInfoLike;
     const windowTitle = appMode === "host" ? "RemoteControl Server" : "RemoteControl Client";
     const result = await dialog.showMessageBox({
       type: "info",
@@ -37,7 +91,7 @@ export function startAutoUpdate(appMode: "combined" | "host" | "viewer", isDev: 
       cancelId: 1,
       title: windowTitle,
       message: "An update has been downloaded",
-      detail: `Version ${info.version} is ready to install. Restart now to apply it.`
+      detail: `Version ${updateInfo.version} is ready to install. Restart now to apply it.`
     });
 
     if (result.response === 0) {
@@ -45,7 +99,22 @@ export function startAutoUpdate(appMode: "combined" | "host" | "viewer", isDev: 
     }
   });
 
-  setTimeout(() => {
+  scheduleUpdateCheck(() => {
     void autoUpdater.checkForUpdatesAndNotify();
   }, 1500);
+
+  return true;
+}
+
+export function startAutoUpdate(appMode: "combined" | "host" | "viewer", isDev: boolean): void {
+  const { app, dialog } = require("electron") as typeof import("electron");
+  const { autoUpdater } = require("electron-updater") as typeof import("electron-updater");
+
+  configureAutoUpdate({
+    app,
+    appMode,
+    autoUpdater: autoUpdater as unknown as AutoUpdaterLike,
+    dialog,
+    isDev
+  });
 }
