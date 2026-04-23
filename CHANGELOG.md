@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Added renderer logic tests for viewer identity, connection view state, source selection and connection stats formatting.
+## v0.2.6 - 2026-04-23
+
 - Added coturn Docker Compose deployment, TURN configuration template and setup documentation.
 - Added automated release versioning/changelog workflow and Windows signing configuration.
+- Improved renderer decomposition, UI component tests, clipboard sync debounce and CI compatibility.
 
 ## v0.2.5 - 2026-04-23
 
