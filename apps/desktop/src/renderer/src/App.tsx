@@ -104,9 +104,7 @@ function RemoteControlApp(): ReactElement {
   const [role, setRole] = useState<PeerRole>(fixedRole ?? "host");
   const [serverUrl, setServerUrl] = useState(defaultServerUrl);
   const [sessionId] = useState(defaultSessionId);
-  const [displayName] = useState(() =>
-    fixedRole === "host" ? "Server" : `Viewer ${Math.floor(Math.random() * 1000)}`
-  );
+  const [deviceName, setDeviceName] = useState("");
   const [sources, setSources] = useState<DesktopCaptureSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [status, setStatus] = useState("Ready to connect");
@@ -152,6 +150,7 @@ function RemoteControlApp(): ReactElement {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const passwordPromptResolverRef = useRef<((password?: string) => void) | undefined>(undefined);
   const viewerApprovalResolverRef = useRef<((approved: boolean) => void) | undefined>(undefined);
+  const displayName = getDisplayName(role, deviceName);
 
   const selectedSource = useMemo(
     () => sources.find((source) => source.id === selectedSourceId),
@@ -164,6 +163,7 @@ function RemoteControlApp(): ReactElement {
     void loadLaunchSettings();
     void loadViewerSettings();
     void loadRecentServers();
+    void loadDeviceName();
     void syncFullscreenState();
   }, []);
 
@@ -586,6 +586,14 @@ function RemoteControlApp(): ReactElement {
       setRecentServers(await window.remoteControl.getRecentServers());
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function loadDeviceName(): Promise<void> {
+    try {
+      setDeviceName(await window.remoteControl.getDeviceName());
+    } catch {
+      setDeviceName("");
     }
   }
 
@@ -2193,6 +2201,15 @@ function getDefaultCaptureSource(sources: DesktopCaptureSource[]): DesktopCaptur
     const name = source.name.toLowerCase();
     return name.includes("screen") || name.includes("display") || name.includes("entire");
   }) ?? sources[0];
+}
+
+function getDisplayName(role: PeerRole, deviceName: string): string {
+  const normalizedDeviceName = deviceName.trim();
+  if (role === "viewer") {
+    return normalizedDeviceName || "Viewer";
+  }
+
+  return "Server";
 }
 
 function formatLatency(value?: number): string {

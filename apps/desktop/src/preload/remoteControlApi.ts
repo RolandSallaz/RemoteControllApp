@@ -48,6 +48,7 @@ export function createRemoteControlApi<TImage>({
   return {
     appMode,
     productName: getProductName(appMode),
+    getDeviceName: () => ipcRenderer.invoke("app:get-device-name"),
     getBackendStatus: () => ipcRenderer.invoke("backend:status"),
     getLaunchSettings: () => ipcRenderer.invoke("app:get-launch-settings"),
     setLaunchOnStartup: (enabled: boolean) => ipcRenderer.invoke("app:set-launch-settings", enabled),

@@ -26,6 +26,7 @@ type AppIpcDependencies = {
   ipcMain: IpcMainLike;
   getLoginItemOpenAtLogin: () => boolean;
   setLoginItemOpenAtLogin: (enabled: boolean) => void;
+  getDeviceName: () => string;
   getHostSettings: () => Promise<Record<string, unknown> & { launchOnStartup?: boolean }>;
   updateHostSettings: (payload: Record<string, unknown>) => Promise<unknown>;
   readHostSettingsFile: () => Promise<Record<string, unknown> & {
@@ -54,6 +55,7 @@ export function registerAppIpcHandlers({
   ipcMain,
   getLoginItemOpenAtLogin,
   setLoginItemOpenAtLogin,
+  getDeviceName,
   getHostSettings,
   updateHostSettings,
   readHostSettingsFile,
@@ -72,6 +74,8 @@ export function registerAppIpcHandlers({
   getLastViewerName,
   setLastViewerName
 }: AppIpcDependencies): void {
+  ipcMain.handle("app:get-device-name", () => sanitizeDeviceName(getDeviceName()));
+
   ipcMain.handle("app:get-launch-settings", async () => {
     if (appMode !== "host") {
       return { launchOnStartup: false };
@@ -254,4 +258,9 @@ export function registerAppIpcHandlers({
     await writeAppSettings({ ...settings, recentServers: nextRecentServers });
     return { ok: true, recentServers: nextRecentServers };
   });
+}
+
+function sanitizeDeviceName(value: string): string {
+  const normalized = value.normalize("NFKC").trim().replace(/\s+/g, " ");
+  return normalized.slice(0, 80) || "Unknown device";
 }

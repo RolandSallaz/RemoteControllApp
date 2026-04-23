@@ -76,6 +76,7 @@ test("createRemoteControlApi routes IPC calls and unsubscribe handlers correctly
   });
 
   assert.equal(api.productName, "RemoteControl Client");
+  await api.getDeviceName();
   await api.setLaunchOnStartup(true);
   await api.appendIncomingFileTransfer("transfer-1", 2, new Uint8Array([1, 2]));
 
@@ -98,6 +99,7 @@ test("createRemoteControlApi routes IPC calls and unsubscribe handlers correctly
   api.writeClipboardText("new text");
 
   assert.deepEqual(invocations, [
+    { channel: "app:get-device-name", args: [] },
     { channel: "app:set-launch-settings", args: [true] },
     {
       channel: "files:append-incoming-transfer",

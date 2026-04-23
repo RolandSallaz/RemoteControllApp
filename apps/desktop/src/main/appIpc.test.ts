@@ -27,6 +27,7 @@ test("registerAppIpcHandlers handles host state and viewer preferences", async (
     setLoginItemOpenAtLogin: (enabled) => {
       openAtLogin = enabled;
     },
+    getDeviceName: () => " DESKTOP-01 ",
     getHostSettings: async () => ({ launchOnStartup: undefined }),
     updateHostSettings: async () => undefined,
     readHostSettingsFile: async () => ({ accessPasswordHash: "hash", requireViewerApproval: true }),
@@ -58,6 +59,7 @@ test("registerAppIpcHandlers handles host state and viewer preferences", async (
     }
   });
 
+  assert.equal(await handlers.get("app:get-device-name")?.(), "DESKTOP-01");
   assert.deepEqual(await handlers.get("app:get-launch-settings")?.(), { launchOnStartup: false });
   assert.deepEqual(await handlers.get("app:set-launch-settings")?.({}, true), { ok: true, launchOnStartup: true });
   assert.equal(openAtLogin, true);
@@ -95,6 +97,7 @@ test("registerAppIpcHandlers falls back to local launch setting while backend is
     ipcMain: { handle: (channel, listener) => handlers.set(channel, listener) },
     getLoginItemOpenAtLogin: () => true,
     setLoginItemOpenAtLogin: () => undefined,
+    getDeviceName: () => "DESKTOP-01",
     getHostSettings: async () => {
       throw new TypeError("fetch failed");
     },

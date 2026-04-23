@@ -35,6 +35,7 @@ declare global {
     remoteControl: {
       appMode: DesktopAppMode;
       productName: string;
+      getDeviceName: () => Promise<string>;
       getBackendStatus: () => Promise<EmbeddedBackendStatus>;
       getLaunchSettings: () => Promise<{ launchOnStartup: boolean }>;
       setLaunchOnStartup: (enabled: boolean) => Promise<{ ok: boolean; launchOnStartup?: boolean; error?: string }>;

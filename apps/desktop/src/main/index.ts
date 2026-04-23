@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { randomBytes, scrypt as scryptCallback } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -162,6 +163,7 @@ function registerIpcHandlers(): void {
     setLoginItemOpenAtLogin: (enabled) => {
       app.setLoginItemSettings({ openAtLogin: enabled });
     },
+    getDeviceName: hostname,
     getHostSettings,
     updateHostSettings,
     readHostSettingsFile,
