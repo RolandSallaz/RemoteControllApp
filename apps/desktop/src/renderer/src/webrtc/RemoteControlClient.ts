@@ -123,6 +123,7 @@ const maxIncomingTransfers = 4;
 const maxDataChannelMessageLength = 13 * 1024 * 1024;
 const fileTransferReasonMaxLength = 256;
 const incomingFileTransferTimeoutMs = 30_000;
+const clipboardSyncDebounceMs = 250;
 const imageDataUrlPrefixPattern = /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,/i;
 const mimeTypePattern = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 const checksumPattern = /^[a-f0-9]{8}$/i;
@@ -181,7 +182,9 @@ export class RemoteControlClient {
   private statsTimer?: ReturnType<typeof setInterval>;
   private statsPollingToken = 0;
   private clipboardTimer?: ReturnType<typeof setInterval>;
+  private clipboardSendTimer?: ReturnType<typeof setTimeout>;
   private clipboardSyncToken = 0;
+  private pendingClipboardMessage?: ClipboardSyncMessage;
   private lastBitrateAdaptationAt = 0;
   private clipboardSnapshot = "";
   private remoteClipboardSnapshot?: string;
@@ -1089,18 +1092,43 @@ export class RemoteControlClient {
       };
 
       this.clipboardSnapshot = nextSnapshot;
-      if (token === this.clipboardSyncToken && channel === this.controlChannel && channel.readyState === "open") {
-        channel.send(JSON.stringify(message));
-      }
+      this.scheduleClipboardSend(token, channel, message);
     }, 800);
   }
 
   private stopClipboardSync(): void {
     this.clipboardSyncToken += 1;
+    this.pendingClipboardMessage = undefined;
+    if (this.clipboardSendTimer) {
+      clearTimeout(this.clipboardSendTimer);
+      this.clipboardSendTimer = undefined;
+    }
     if (this.clipboardTimer) {
       clearInterval(this.clipboardTimer);
       this.clipboardTimer = undefined;
     }
+  }
+
+  private scheduleClipboardSend(token: number, channel: RTCDataChannel, message: ClipboardSyncMessage): void {
+    this.pendingClipboardMessage = message;
+    if (this.clipboardSendTimer) {
+      clearTimeout(this.clipboardSendTimer);
+    }
+
+    this.clipboardSendTimer = setTimeout(() => {
+      const pendingMessage = this.pendingClipboardMessage;
+      this.pendingClipboardMessage = undefined;
+      this.clipboardSendTimer = undefined;
+
+      if (
+        pendingMessage
+        && token === this.clipboardSyncToken
+        && channel === this.controlChannel
+        && channel.readyState === "open"
+      ) {
+        channel.send(JSON.stringify(pendingMessage));
+      }
+    }, clipboardSyncDebounceMs);
   }
 
   private async applyRemoteClipboard(message: ClipboardSyncMessage): Promise<void> {

@@ -1,4 +1,4 @@
-import type { ChangeEvent, ReactElement, RefObject } from "react";
+import React, { type ChangeEvent, type ReactElement, type RefObject } from "react";
 import type { ControlMessage, HostSource, PeerJoinedPayload, PeerRole } from "@remote-control/shared";
 
 import type { DesktopAppMode, DesktopCaptureSource } from "../env";

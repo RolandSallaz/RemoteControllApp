@@ -1,4 +1,4 @@
-import type { ChangeEvent, ReactElement, RefObject } from "react";
+import React, { type ChangeEvent, type ReactElement, type RefObject } from "react";
 import type { DiscoveredServer, PeerJoinedPayload, PeerRole } from "@remote-control/shared";
 
 import { extractServerLabel } from "../appLogic";

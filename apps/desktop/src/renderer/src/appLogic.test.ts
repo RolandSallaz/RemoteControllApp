@@ -9,7 +9,8 @@ import {
   formatPacketLoss,
   getDefaultCaptureSource,
   getDisplayName,
-  getRemoteControlViewState
+  getRemoteControlViewState,
+  hasDraggedFiles
 } from "./appLogic";
 
 test("viewer identity uses the device name instead of a generated viewer label", () => {
@@ -95,4 +96,9 @@ test("renderer formatting helpers keep connection stats readable", () => {
   assert.equal(formatFileSize(1024), "1 KB");
   assert.equal(formatFileSize(5 * 1024 * 1024), "5.0 MB");
   assert.equal(formatFileSize(2 * 1024 * 1024 * 1024), "2.0 GB");
+});
+
+test("hasDraggedFiles detects file drag payloads", () => {
+  assert.equal(hasDraggedFiles({ types: ["text/plain", "Files"] } as DataTransfer), true);
+  assert.equal(hasDraggedFiles({ types: ["text/plain"] } as DataTransfer), false);
 });

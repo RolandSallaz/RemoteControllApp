@@ -1,4 +1,4 @@
-import { useEffect, useRef, type PointerEvent, type ReactElement, type RefObject } from "react";
+import React, { useEffect, useRef, type PointerEvent, type ReactElement, type RefObject } from "react";
 import type { ControlMessage } from "@remote-control/shared";
 
 import { isInputCaptureExitShortcut, isKeyboardShortcut } from "../hotkeys";

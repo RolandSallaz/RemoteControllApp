@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import React, { useEffect, useState, type ReactElement } from "react";
 
 export function HostSettingsPage(): ReactElement {
   const [saveDirectory, setSaveDirectory] = useState("");

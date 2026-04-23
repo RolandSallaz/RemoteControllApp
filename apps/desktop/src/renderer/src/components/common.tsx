@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from "react";
+import React, { type CSSProperties, type ReactElement } from "react";
 
 import type { EmbeddedBackendStatus } from "../env";
 import { hotkeyFromKeyboardEvent } from "../hotkeys";

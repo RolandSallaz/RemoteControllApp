@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import React, { type ReactElement } from "react";
 import type { ViewerApprovalRequestPayload } from "@remote-control/shared";
 
 export type PasswordPromptState = {

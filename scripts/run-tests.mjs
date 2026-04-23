@@ -97,7 +97,7 @@ async function collectTestFiles(directory) {
       continue;
     }
 
-    if (entry.isFile() && entry.name.endsWith(".test.ts")) {
+    if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx"))) {
       testFiles.push(path);
     }
   }
@@ -275,6 +275,7 @@ async function walkCoverageSourceTree(directory, files) {
       (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))
       && !entry.name.endsWith(".d.ts")
       && !entry.name.endsWith(".test.ts")
+      && !entry.name.endsWith(".test.tsx")
     ) {
       files.push(path);
     }
