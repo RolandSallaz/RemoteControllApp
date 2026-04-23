@@ -143,6 +143,7 @@ function RemoteControlApp(): ReactElement {
   const [switchMonitorShortcut, setSwitchMonitorShortcut] = useState("Ctrl+Alt+Shift+M");
   const [passwordPrompt, setPasswordPrompt] = useState<{ message: string; password: string } | undefined>();
   const [viewerApprovalPrompt, setViewerApprovalPrompt] = useState<ViewerApprovalRequestPayload | undefined>();
+  const [isSetupSettingsOpen, setIsSetupSettingsOpen] = useState(false);
 
   const clientRef = useRef<RemoteControlClient | undefined>(undefined);
   const hostAutoConnectStartedRef = useRef(false);
@@ -1034,69 +1035,93 @@ function RemoteControlApp(): ReactElement {
 
           {appMode !== "host" && (
           <>
-          <div className="section">
-            <div className="field">
-              <label>Server URL</label>
+            {/* LAN discovery — shown first for quick access */}
+            {role === "viewer" && !isConnected && (
+              <div className="setup-section">
+                <div className="setup-section-header">
+                  <span className="section-label">LAN Servers</span>
+                  <button
+                    type="button"
+                    className="setup-scan-btn"
+                    onClick={() => void scanServers()}
+                    disabled={isDiscovering}
+                  >
+                    {isDiscovering ? "Scanning…" : "Scan"}
+                  </button>
+                </div>
+                {discoveredServers.length === 0 ? (
+                  <div className="setup-empty-hint">
+                    {isDiscovering
+                      ? "Searching for servers on your network…"
+                      : "Press Scan to find servers on your local network."}
+                  </div>
+                ) : (
+                  <div className="setup-server-grid">
+                    {discoveredServers.map((server) => (
+                      <button
+                        type="button"
+                        key={`${server.address}:${server.port}`}
+                        className={`setup-server-card${serverUrl === server.url ? " selected" : ""}`}
+                        onClick={() => setServerUrl(server.url)}
+                        disabled={isConnected}
+                      >
+                        <span className="setup-server-name">{server.name}</span>
+                        <span className="setup-server-addr">{server.url}</span>
+                        {serverLatencies.has(server.url) && (
+                          <span className="setup-server-ping">{serverLatencies.get(server.url)} ms</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Server URL */}
+            <div className="setup-section">
+              <label className="setup-field-label">Server Address</label>
               <input
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
                 disabled={isConnected}
-                placeholder="http://192.168.1.25:3001"
+                placeholder="http://192.168.1.x:47315"
               />
             </div>
 
+            {/* Recent servers as compact pills */}
             {role === "viewer" && !isConnected && recentServers.length > 0 && (
-              <div className="field">
-                <label>Recent Servers</label>
-                <div className="server-list">
+              <div className="setup-section">
+                <div className="section-label">Recent</div>
+                <div className="setup-recent-list">
                   {recentServers.map((item) => (
                     <button
                       type="button"
                       key={item}
-                      className={`server-item ${serverUrl === item ? "selected" : ""}`}
+                      className={`setup-recent-pill${serverUrl === item ? " selected" : ""}`}
                       onClick={() => setServerUrl(item)}
                       disabled={isConnected}
                     >
-                      <span className="server-name">{extractServerLabel(item)}</span>
-                      <span className="server-url">{item}</span>
+                      {extractServerLabel(item)}
                     </button>
                   ))}
                 </div>
               </div>
             )}
 
+            {/* Host-only: capture mode + frame rate */}
             {role === "host" && (
-              <div className="field">
-                <label>Capture Mode</label>
+              <div className="setup-section">
+                <label className="setup-field-label">Capture Mode</label>
                 <div className="role-tabs">
-                  <button
-                    type="button"
-                    className={`role-tab ${captureMode === "desktop" ? "active" : ""}`}
-                    onClick={() => setCaptureMode("desktop")}
-                    disabled={isConnected}
-                  >
-                    Desktop
-                  </button>
-                  <button
-                    type="button"
-                    className={`role-tab ${captureMode === "game" ? "active" : ""}`}
-                    onClick={() => setCaptureMode("game")}
-                    disabled={isConnected}
-                  >
-                    Game
-                  </button>
+                  <button type="button" className={`role-tab ${captureMode === "desktop" ? "active" : ""}`} onClick={() => setCaptureMode("desktop")} disabled={isConnected}>Desktop</button>
+                  <button type="button" className={`role-tab ${captureMode === "game" ? "active" : ""}`} onClick={() => setCaptureMode("game")} disabled={isConnected}>Game</button>
                 </div>
               </div>
             )}
-
             {role === "host" && (
-              <div className="field">
-                <label>Frame Rate</label>
-                <select
-                  value={frameRate}
-                  onChange={(e) => setFrameRate(Number(e.target.value) as FrameRate)}
-                  disabled={isConnected}
-                >
+              <div className="setup-section">
+                <label className="setup-field-label">Frame Rate</label>
+                <select value={frameRate} onChange={(e) => setFrameRate(Number(e.target.value) as FrameRate)} disabled={isConnected}>
                   <option value={15}>15 FPS — low bandwidth</option>
                   <option value={30}>30 FPS — balanced</option>
                   <option value={60}>60 FPS — smooth / games</option>
@@ -1104,109 +1129,53 @@ function RemoteControlApp(): ReactElement {
               </div>
             )}
 
+            {/* Viewer settings — collapsible */}
             {role === "viewer" && !isConnected && (
-              <div className="viewer-setup-settings">
-                <div className="section-label">Viewer Settings</div>
-
-                <label className="toggle-field compact-toggle">
-                  <input
-                    type="checkbox"
-                    checked={connectInFullscreen}
-                    onChange={(event) => changeConnectInFullscreen(event.target.checked)}
-                  />
-                  <span>
-                    <strong>Connect in fullscreen</strong>
-                    <small>Enter fullscreen automatically after connecting</small>
-                  </span>
-                </label>
-
-                <label className="toggle-field compact-toggle">
-                  <input
-                    type="checkbox"
-                    checked={captureLocalInput}
-                    onChange={(event) => changeCaptureLocalInput(event.target.checked)}
-                  />
-                  <span>
-                    <strong>Capture local input</strong>
-                    <small>Route keyboard and pointer input to the remote PC</small>
-                  </span>
-                </label>
-
-                <div className="field">
-                  <label>Stream FPS</label>
-                  <select
-                    value={viewerFrameRate}
-                    onChange={(event) => changeViewerFrameRate(Number(event.target.value) as FrameRate)}
-                  >
-                    <option value={15}>15 FPS - low bandwidth</option>
-                    <option value={30}>30 FPS - balanced</option>
-                    <option value={60}>60 FPS - smooth</option>
-                  </select>
-                </div>
-
-                <label className="toggle-field compact-toggle">
-                  <input
-                    type="checkbox"
-                    checked={receiveStreamAudio}
-                    onChange={(event) => changeReceiveStreamAudio(event.target.checked)}
-                  />
-                  <span>
-                    <strong>Receive stream audio</strong>
-                    <small>Play and request audio from the remote stream</small>
-                  </span>
-                </label>
-
-                <HotkeyField
-                  label="Switch monitor shortcut"
-                  value={switchMonitorShortcut}
-                  onChange={changeSwitchMonitorShortcut}
-                />
-                <HotkeyField
-                  label="Disconnect shortcut"
-                  value={disconnectShortcut}
-                  onChange={changeDisconnectShortcut}
-                />
-              </div>
-            )}
-
-            {role === "viewer" && !isConnected && (
-              <div className="lan-discovery">
-                <div className="source-section-header">
-                  <div className="section-label" style={{ margin: 0, padding: 0 }}>LAN Servers</div>
-                  <button
-                    type="button"
-                    onClick={() => void scanServers()}
-                    disabled={isDiscovering || isConnected}
-                    style={{ fontSize: 12, minHeight: 26, padding: "0 8px" }}
-                  >
-                    {isDiscovering ? "Scanning" : "Scan"}
-                  </button>
-                </div>
-
-                <div className="server-list">
-                  {discoveredServers.length === 0 ? (
-                    <div className="server-empty">No servers found yet.</div>
-                  ) : (
-                    discoveredServers.map((server) => (
-                      <button
-                        type="button"
-                        key={`${server.address}:${server.port}`}
-                        className={`server-item ${serverUrl === server.url ? "selected" : ""}`}
-                        onClick={() => setServerUrl(server.url)}
-                        disabled={isConnected}
+              <div className="setup-section">
+                <button
+                  type="button"
+                  className="setup-settings-toggle"
+                  onClick={() => setIsSetupSettingsOpen((v) => !v)}
+                >
+                  <span>Connection Settings</span>
+                  <span className={`setup-settings-chevron${isSetupSettingsOpen ? " open" : ""}`}>▾</span>
+                </button>
+                {isSetupSettingsOpen && (
+                  <div className="setup-settings-body">
+                    <SettingsToggle
+                      checked={connectInFullscreen}
+                      onChange={changeConnectInFullscreen}
+                      label="Connect in fullscreen"
+                      sub="Enter fullscreen automatically after connecting"
+                    />
+                    <SettingsToggle
+                      checked={captureLocalInput}
+                      onChange={changeCaptureLocalInput}
+                      label="Capture local input"
+                      sub="Route all input to the remote PC"
+                    />
+                    <SettingsToggle
+                      checked={receiveStreamAudio}
+                      onChange={changeReceiveStreamAudio}
+                      label="Receive audio"
+                    />
+                    <div className="field">
+                      <label>Frame rate</label>
+                      <select
+                        value={viewerFrameRate}
+                        onChange={(event) => changeViewerFrameRate(Number(event.target.value) as FrameRate)}
                       >
-                        <span className="server-name">{server.name}</span>
-                        <span className="server-url">{server.url}</span>
-                        {serverLatencies.has(server.url) && (
-                          <span className="server-ping">{serverLatencies.get(server.url)} ms</span>
-                        )}
-                      </button>
-                    ))
-                  )}
-                </div>
+                        <option value={15}>15 FPS — low bandwidth</option>
+                        <option value={30}>30 FPS — balanced</option>
+                        <option value={60}>60 FPS — smooth</option>
+                      </select>
+                    </div>
+                    <HotkeyField label="Switch monitor" value={switchMonitorShortcut} onChange={changeSwitchMonitorShortcut} />
+                    <HotkeyField label="Disconnect" value={disconnectShortcut} onChange={changeDisconnectShortcut} />
+                  </div>
+                )}
               </div>
             )}
-          </div>
           </>
           )}
 
@@ -1432,6 +1401,37 @@ function HotkeyField({
   );
 }
 
+type SettingsTab = "control" | "stream" | "files";
+
+function SettingsToggle({
+  checked,
+  onChange,
+  label,
+  sub
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  sub?: string;
+}): ReactElement {
+  return (
+    <label className="settings-toggle-row">
+      <div className="settings-toggle-text">
+        <span className="settings-toggle-label">{label}</span>
+        {sub && <span className="settings-toggle-sub">{sub}</span>}
+      </div>
+      <div className="settings-switch">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="settings-switch-track" aria-hidden="true" />
+      </div>
+    </label>
+  );
+}
+
 function ViewerSettingsOverlay({
   activeRemoteSourceId,
   captureLocalInput,
@@ -1447,7 +1447,7 @@ function ViewerSettingsOverlay({
   isOpen,
   receiveAudio,
   saveDirectory,
-  status,
+  status: _status,
   switchMonitorShortcut,
   transferLabel,
   transferProgress,
@@ -1503,6 +1503,7 @@ function ViewerSettingsOverlay({
 }): ReactElement {
   const [position, setPosition] = useState<ViewerOverlayPosition>({ top: 14, right: 14 });
   const [isHotkeysHintOpen, setIsHotkeysHintOpen] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>("control");
   const dragRef = useRef<ViewerOverlayDragState | undefined>(undefined);
   const skipNextClickRef = useRef(false);
   const showHotkeysHint = isHotkeysHintOpen && !isHotkeysOpen && !isOpen;
@@ -1604,7 +1605,7 @@ function ViewerSettingsOverlay({
         onBlur={() => setIsHotkeysHintOpen(false)}
         aria-label="Open viewer settings"
       >
-        RC
+        ⚙
       </button>
 
       {showHotkeysHint && (
@@ -1624,178 +1625,172 @@ function ViewerSettingsOverlay({
           aria-label="Viewer settings"
         >
           <div className="viewer-settings-header">
-            <div>
-              <div className="section-label">Settings</div>
-              <h2>Viewer Settings</h2>
+            <div className="viewer-settings-title-row">
+              <div>
+                <div className="section-label">Remote Control</div>
+                <h2>Settings</h2>
+              </div>
+              <button type="button" className="btn-icon" onClick={onClose} aria-label="Close settings">
+                ✕
+              </button>
             </div>
-            <button type="button" className="btn-icon" onClick={onClose} aria-label="Close settings">
-              X
-            </button>
+            {connectionStats && (
+              <div className="viewer-stats-bar">
+                <div className="viewer-stat">
+                  <span className="viewer-stat-label">Ping</span>
+                  <strong>{formatLatency(connectionStats.latencyMs)}</strong>
+                </div>
+                <div className="viewer-stat-sep" />
+                <div className="viewer-stat">
+                  <span className="viewer-stat-label">Video</span>
+                  <strong>{formatBitrate(connectionStats.videoBitrateKbps)}</strong>
+                </div>
+                <div className="viewer-stat-sep" />
+                <div className="viewer-stat">
+                  <span className="viewer-stat-label">Audio</span>
+                  <strong>{formatBitrate(connectionStats.audioBitrateKbps)}</strong>
+                </div>
+                <div className="viewer-stat-sep" />
+                <div className="viewer-stat">
+                  <span className="viewer-stat-label">Loss</span>
+                  <strong className={connectionStats.packetLossPercent != null && connectionStats.packetLossPercent > 2 ? "stat-warn" : ""}>
+                    {formatPacketLoss(connectionStats.packetLossPercent, connectionStats.packetsLost)}
+                  </strong>
+                </div>
+              </div>
+            )}
           </div>
 
-          <div className="viewer-settings-body">
-            <div className="viewer-settings-status">
-              <div className="status-dot connected" />
-              <span>{status}</span>
-            </div>
-
-            <label className="toggle-field compact-toggle">
-              <input
-                type="checkbox"
-                checked={connectInFullscreen}
-                onChange={(event) => onToggleConnectInFullscreen(event.target.checked)}
-              />
-              <span>
-                <strong>Connect in fullscreen</strong>
-                <small>Enter fullscreen automatically after connecting</small>
-              </span>
-            </label>
-
-            <label className="toggle-field compact-toggle">
-              <input
-                type="checkbox"
-                checked={controlEnabled}
-                onChange={(event) => onToggleControl(event.target.checked)}
-              />
-              <span>
-                <strong>Take control</strong>
-                <small>Send mouse and keyboard input to the host</small>
-              </span>
-            </label>
-
-            <label className="toggle-field compact-toggle">
-              <input
-                type="checkbox"
-                checked={captureLocalInput}
-                onChange={(event) => onToggleCaptureLocalInput(event.target.checked)}
-              />
-              <span>
-                <strong>Capture local input</strong>
-                <small>All keyboard and pointer input goes to the remote PC. Press Ctrl+Alt+Shift+Esc to exit.</small>
-              </span>
-            </label>
-
-            <div className="field">
-              <label>Stream FPS</label>
-              <select
-                value={frameRate}
-                onChange={(event) => onChangeFrameRate(Number(event.target.value) as FrameRate)}
+          <div className="viewer-settings-tabs" role="tablist">
+            {(["control", "stream", "files"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                aria-selected={tab === t}
+                className={`viewer-settings-tab${tab === t ? " active" : ""}`}
+                onClick={() => setTab(t)}
               >
-                <option value={15}>15 FPS - low bandwidth</option>
-                <option value={30}>30 FPS - balanced</option>
-                <option value={60}>60 FPS - smooth</option>
-              </select>
-            </div>
+                {t === "control" ? "Control" : t === "stream" ? "Stream" : "Files"}
+              </button>
+            ))}
+          </div>
 
-            <label className="toggle-field compact-toggle">
-              <input
-                type="checkbox"
-                checked={receiveAudio}
-                onChange={(event) => onToggleReceiveAudio(event.target.checked)}
-              />
-              <span>
-                <strong>Receive stream audio</strong>
-                <small>Play and request audio from the remote stream</small>
-              </span>
-            </label>
-
-            <HotkeyField
-              label="Switch monitor shortcut"
-              value={switchMonitorShortcut}
-              onChange={onChangeSwitchMonitorShortcut}
-            />
-            <HotkeyField
-              label="Disconnect shortcut"
-              value={disconnectShortcut}
-              onChange={onChangeDisconnectShortcut}
-            />
-
-            {hostSources.length > 1 && (
-              <div className="field">
-                <label>Monitor</label>
-                <select
-                  value={activeRemoteSourceId ?? ""}
-                  onChange={(event) => onSwitchRemoteSource(event.target.value)}
-                >
-                  {hostSources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <div className="viewer-settings-body" role="tabpanel">
+            {tab === "control" && (
+              <>
+                <SettingsToggle
+                  checked={controlEnabled}
+                  onChange={onToggleControl}
+                  label="Take control"
+                  sub="Send mouse and keyboard input to the host"
+                />
+                <SettingsToggle
+                  checked={captureLocalInput}
+                  onChange={onToggleCaptureLocalInput}
+                  label="Capture local input"
+                  sub="All input routed to remote PC. Press Ctrl+Alt+Shift+Esc to exit."
+                />
+                <div className="settings-group-label">Shortcuts</div>
+                <HotkeyField
+                  label="Disconnect"
+                  value={disconnectShortcut}
+                  onChange={onChangeDisconnectShortcut}
+                />
+                <HotkeyField
+                  label="Switch monitor"
+                  value={switchMonitorShortcut}
+                  onChange={onChangeSwitchMonitorShortcut}
+                />
+              </>
             )}
 
-            <div className="field">
-              <label>File Transfer</label>
-              <input
-                ref={fileInputRef}
-                type="file"
-                style={{ display: "none" }}
-                onChange={onFileInputChange}
-              />
-              <button type="button" onClick={onSelectFile}>
-                Choose File
-              </button>
-              <div className="drop-hint">
-                Drag files directly onto the remote screen to send them to the host.
-              </div>
-              <div className="inline-actions">
-                <button type="button" className="secondary-action" onClick={onChooseSaveDirectory}>
-                  Receive Folder
+            {tab === "stream" && (
+              <>
+                <SettingsToggle
+                  checked={receiveAudio}
+                  onChange={onToggleReceiveAudio}
+                  label="Receive audio"
+                  sub="Play audio from the remote stream"
+                />
+                <SettingsToggle
+                  checked={connectInFullscreen}
+                  onChange={onToggleConnectInFullscreen}
+                  label="Connect in fullscreen"
+                  sub="Enter fullscreen automatically after connecting"
+                />
+                <div className="field">
+                  <label>Frame rate</label>
+                  <select
+                    value={frameRate}
+                    onChange={(event) => onChangeFrameRate(Number(event.target.value) as FrameRate)}
+                  >
+                    <option value={15}>15 FPS — low bandwidth</option>
+                    <option value={30}>30 FPS — balanced</option>
+                    <option value={60}>60 FPS — smooth</option>
+                  </select>
+                </div>
+                {hostSources.length > 1 && (
+                  <div className="field">
+                    <label>Monitor</label>
+                    <select
+                      value={activeRemoteSourceId ?? ""}
+                      onChange={(event) => onSwitchRemoteSource(event.target.value)}
+                    >
+                      {hostSources.map((source) => (
+                        <option key={source.id} value={source.id}>
+                          {source.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </>
+            )}
+
+            {tab === "files" && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={onFileInputChange}
+                />
+                <button type="button" className="settings-action-btn" onClick={onSelectFile}>
+                  Send File to Host
                 </button>
-                <div className="path-hint" title={saveDirectory}>
-                  {saveDirectory}
+                <div className="settings-inline-row">
+                  <button type="button" className="secondary-action" onClick={onChooseSaveDirectory}>
+                    Receive Folder
+                  </button>
+                  <span className="path-hint" title={saveDirectory}>{saveDirectory || "Not set"}</span>
                 </div>
-              </div>
-              {transferLabel && (
-                <div className="transfer-status">
-                  <div className="transfer-meta">
-                    <span className="transfer-name">{transferLabel}</span>
-                    <span className="transfer-percent">{transferProgress ?? 0}%</span>
+                {transferLabel && (
+                  <div className="transfer-status">
+                    <div className="transfer-meta">
+                      <span className="transfer-name">{transferLabel}</span>
+                      <span className="transfer-percent">{transferProgress ?? 0}%</span>
+                    </div>
+                    <div className="transfer-bar">
+                      <div
+                        className="transfer-bar-fill"
+                        style={{ width: `${transferProgress ?? 0}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="transfer-bar">
-                    <div
-                      className="transfer-bar-fill"
-                      style={{ width: `${transferProgress ?? 0}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {connectionStats && (
-              <div className="stats-card">
-                <div className="stats-card-title">Connection</div>
-                <div className="stats-grid">
-                  <div className="stats-item">
-                    <span className="stats-label">Latency</span>
-                    <strong>{formatLatency(connectionStats.latencyMs)}</strong>
-                  </div>
-                  <div className="stats-item">
-                    <span className="stats-label">Video</span>
-                    <strong>{formatBitrate(connectionStats.videoBitrateKbps)}</strong>
-                  </div>
-                  <div className="stats-item">
-                    <span className="stats-label">Audio</span>
-                    <strong>{formatBitrate(connectionStats.audioBitrateKbps)}</strong>
-                  </div>
-                  <div className="stats-item">
-                    <span className="stats-label">Loss</span>
-                    <strong>{formatPacketLoss(connectionStats.packetLossPercent, connectionStats.packetsLost)}</strong>
-                  </div>
-                </div>
-              </div>
+                )}
+                <div className="drop-hint">Drag files onto the remote screen to send them to the host.</div>
+              </>
             )}
+          </div>
 
-            <div className="viewer-settings-actions">
-              <button type="button" className="secondary-action" onClick={onToggleFullscreen}>
-                {isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-              </button>
-              <button type="button" className="connect-btn btn-danger" onClick={onDisconnect}>
-                Disconnect
-              </button>
-            </div>
+          <div className="viewer-settings-footer">
+            <button type="button" className="secondary-action" onClick={onToggleFullscreen}>
+              {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+            </button>
+            <button type="button" className="connect-btn btn-danger" onClick={onDisconnect}>
+              Disconnect
+            </button>
           </div>
         </div>
       )}

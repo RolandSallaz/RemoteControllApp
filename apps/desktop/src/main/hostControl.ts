@@ -86,7 +86,12 @@ async function applyKeyboardEvent(nut: NutModule, event: ControlKeyboardEvent): 
 }
 
 async function movePointer(nut: NutModule, x: number, y: number): Promise<void> {
-  await nut.mouse.move(nut.straightTo(new nut.Point(Math.round(x), Math.round(y))));
+  const point = new nut.Point(Math.round(x), Math.round(y));
+  if ("setPosition" in nut.mouse && typeof (nut.mouse as { setPosition?: unknown }).setPosition === "function") {
+    await (nut.mouse as { setPosition: (p: unknown) => Promise<void> }).setPosition(point);
+  } else {
+    await nut.mouse.move(nut.straightTo(point));
+  }
 }
 
 function mapMouseButton(nut: NutModule, button: "left" | "middle" | "right"): unknown {

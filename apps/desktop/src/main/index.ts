@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { randomBytes, scrypt as scryptCallback } from "node:crypto";
-import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -208,6 +208,7 @@ function registerIpcHandlers(): void {
       await mkdir(path, options);
     },
     appendFile,
+    rename,
     unlink,
     incomingFileSaves
   });

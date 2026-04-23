@@ -7,6 +7,7 @@ test("registerFileIpcHandlers manages save directory and transfer lifecycle", as
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const incomingFileSaves = new Map();
   const appended: Array<{ path: string; bytes: Buffer }> = [];
+  const renamed: Array<{ from: string; to: string }> = [];
   let appSettings: Record<string, unknown> = {};
 
   registerFileIpcHandlers({
@@ -30,6 +31,9 @@ test("registerFileIpcHandlers manages save directory and transfer lifecycle", as
     mkdir: async () => undefined,
     appendFile: async (path, bytes) => {
       appended.push({ path, bytes });
+    },
+    rename: async (from, to) => {
+      renamed.push({ from, to });
     },
     unlink: async () => undefined,
     incomingFileSaves
@@ -69,7 +73,14 @@ test("registerFileIpcHandlers manages save directory and transfer lifecycle", as
     ok: true,
     path: "C:/chosen/file.txt"
   });
-  assert.equal(appended.length, 2);
+  assert.deepEqual(appended, [
+    { path: "C:/chosen/file.txt.part", bytes: Buffer.from([1, 2]) },
+    { path: "C:/chosen/file.txt.part", bytes: Buffer.from([3]) }
+  ]);
+  assert.deepEqual(renamed, [{
+    from: "C:/chosen/file.txt.part",
+    to: "C:/chosen/file.txt"
+  }]);
 });
 
 test("registerFileIpcHandlers rejects invalid inputs and oversized chunks", async () => {
@@ -80,6 +91,7 @@ test("registerFileIpcHandlers rejects invalid inputs and oversized chunks", asyn
       expectedChunkIndex: 0,
       expectedSize: 1,
       filePath: "C:/downloads/file.txt",
+      tempFilePath: "C:/downloads/file.txt.part",
       receivedBytes: 0
     }]
   ]);
@@ -102,6 +114,7 @@ test("registerFileIpcHandlers rejects invalid inputs and oversized chunks", asyn
     createUniqueFilePath: async () => "unused",
     mkdir: async () => undefined,
     appendFile: async () => undefined,
+    rename: async () => undefined,
     unlink: async (path) => {
       unlinked.push(path);
     },
@@ -124,5 +137,5 @@ test("registerFileIpcHandlers rejects invalid inputs and oversized chunks", asyn
     ok: false,
     error: "File transfer exceeded expected size"
   });
-  assert.deepEqual(unlinked, ["C:/downloads/file.txt"]);
+  assert.deepEqual(unlinked, ["C:/downloads/file.txt.part"]);
 });

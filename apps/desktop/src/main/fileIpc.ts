@@ -8,6 +8,7 @@ export type IncomingFileSaveSession = {
   expectedChunkIndex: number;
   expectedSize: number;
   filePath: string;
+  tempFilePath: string;
   receivedBytes: number;
 };
 
@@ -37,6 +38,7 @@ type FileIpcDependencies = {
   createUniqueFilePath: (directory: string, fileName: string) => Promise<string>;
   mkdir: (path: string, options: { recursive: true }) => Promise<void>;
   appendFile: (path: string, bytes: Buffer) => Promise<void>;
+  rename: (fromPath: string, toPath: string) => Promise<void>;
   unlink: (path: string) => Promise<void>;
   incomingFileSaves: Map<string, IncomingFileSaveSession>;
 };
@@ -59,6 +61,7 @@ export function registerFileIpcHandlers({
   createUniqueFilePath,
   mkdir,
   appendFile,
+  rename,
   unlink,
   incomingFileSaves
 }: FileIpcDependencies): void {
@@ -136,10 +139,12 @@ export function registerFileIpcHandlers({
 
       const safeName = sanitizeFileName(transferPayload.name);
       const filePath = await createUniqueFilePath(saveDirectory, safeName);
+      const tempFilePath = `${filePath}.part`;
       incomingFileSaves.set(transferPayload.transferId, {
         expectedChunkIndex: 0,
         expectedSize: transferPayload.size,
         filePath,
+        tempFilePath,
         receivedBytes: 0
       });
 
@@ -169,11 +174,11 @@ export function registerFileIpcHandlers({
       const bytes = Buffer.from(transferPayload.bytes);
       if (transfer.receivedBytes + bytes.byteLength > transfer.expectedSize) {
         incomingFileSaves.delete(transferPayload.transferId);
-        await unlink(transfer.filePath).catch(() => undefined);
+        await unlink(transfer.tempFilePath).catch(() => undefined);
         return { ok: false, error: "File transfer exceeded expected size" };
       }
 
-      await appendFile(transfer.filePath, bytes);
+      await appendFile(transfer.tempFilePath, bytes);
       transfer.receivedBytes += bytes.byteLength;
       transfer.expectedChunkIndex += 1;
       return { ok: true, receivedBytes: transfer.receivedBytes };
@@ -193,10 +198,11 @@ export function registerFileIpcHandlers({
 
       incomingFileSaves.delete(transferId);
       if (transfer.receivedBytes !== transfer.expectedSize) {
-        await unlink(transfer.filePath).catch(() => undefined);
+        await unlink(transfer.tempFilePath).catch(() => undefined);
         return { ok: false, error: "File transfer incomplete" };
       }
 
+      await rename(transfer.tempFilePath, transfer.filePath);
       return { ok: true, path: transfer.filePath };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -209,7 +215,7 @@ export function registerFileIpcHandlers({
     const transfer = transferId ? incomingFileSaves.get(transferId) : undefined;
     if (transferId && transfer) {
       incomingFileSaves.delete(transferId);
-      await unlink(transfer.filePath).catch(() => undefined);
+      await unlink(transfer.tempFilePath).catch(() => undefined);
     }
 
     return { ok: true };

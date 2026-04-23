@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   parseDataChannelMessage,
+  reduceSessionLifecycleState,
   sanitizeClipboardSyncMessage,
   sanitizeFileTransferAbortMessage,
   sanitizeFileTransferChunkMessage,
@@ -15,6 +16,25 @@ import {
 test("data channel parser rejects oversized raw messages", () => {
   const oversized = `"${"x".repeat(13 * 1024 * 1024)}"`;
   assert.equal(parseDataChannelMessage(oversized), undefined);
+});
+
+test("session lifecycle reducer tracks join recovery and reset phases", () => {
+  let state = reduceSessionLifecycleState("idle", "connect-requested");
+  state = reduceSessionLifecycleState(state, "signaling-connected");
+  state = reduceSessionLifecycleState(state, "join-requested");
+  state = reduceSessionLifecycleState(state, "join-succeeded");
+  state = reduceSessionLifecycleState(state, "peer-announced");
+  state = reduceSessionLifecycleState(state, "webrtc-connected");
+  assert.equal(state, "peer-connected");
+
+  state = reduceSessionLifecycleState(state, "recovery-started");
+  assert.equal(state, "recovering");
+
+  state = reduceSessionLifecycleState(state, "peer-reset");
+  assert.equal(state, "session-joined");
+
+  state = reduceSessionLifecycleState(state, "disconnected");
+  assert.equal(state, "disconnected");
 });
 
 test("host state validation rejects duplicates and unknown active source", () => {

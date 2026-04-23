@@ -70,6 +70,28 @@ export type RemoteControlDiagnostic = {
   details?: Record<string, string | number | boolean | undefined>;
 };
 
+export type SessionLifecycleState =
+  | "idle"
+  | "signaling-connecting"
+  | "signaling-connected"
+  | "joining-session"
+  | "session-joined"
+  | "peer-connecting"
+  | "peer-connected"
+  | "recovering"
+  | "disconnected";
+
+export type SessionLifecycleEvent =
+  | "connect-requested"
+  | "signaling-connected"
+  | "join-requested"
+  | "join-succeeded"
+  | "peer-announced"
+  | "webrtc-connected"
+  | "recovery-started"
+  | "peer-reset"
+  | "disconnected";
+
 type IncomingFileTransfer = {
   checksum: number;
   failed: boolean;
@@ -121,6 +143,14 @@ export type RemoteControlClientOptions = {
   onViewerApprovalRequest?: (request: ViewerApprovalRequestPayload) => Promise<boolean>;
   onStats?: (stats: ConnectionStats | undefined) => void;
   onFileReceived?: (file: { name: string; path?: string }) => void;
+  onFileTransferProgress?: (transfer: {
+    direction: "incoming" | "outgoing";
+    name: string;
+    transferId: string;
+    bytesTransferred: number;
+    totalBytes: number;
+    progress: number;
+  }) => void;
   onDiagnostic?: (diagnostic: RemoteControlDiagnostic) => void;
   onLocalStream: (stream: MediaStream | undefined) => void;
   onRemoteStream: (stream: MediaStream | undefined) => void;
@@ -143,6 +173,7 @@ export class RemoteControlClient {
   private readonly pendingCandidates: RTCIceCandidateInit[] = [];
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectInProgress = false;
+  private remoteTrackWatchdogTimer?: ReturnType<typeof setTimeout>;
   private isDisconnected = true;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private networkRecoveryTimer?: ReturnType<typeof setTimeout>;
@@ -156,6 +187,7 @@ export class RemoteControlClient {
   private remoteClipboardSnapshot?: string;
   private lastSessionPassword?: string;
   private readonly outgoingTransferAbortReasons = new Map<string, string>();
+  private lifecycleState: SessionLifecycleState = "idle";
   private previousStatsSample?: {
     timestamp: number;
     videoBytes: number;
@@ -173,6 +205,7 @@ export class RemoteControlClient {
 
   async connect(): Promise<void> {
     this.isDisconnected = false;
+    this.transitionLifecycle("connect-requested");
 
     if (this.options.role === "host") {
       await this.startDesktopCapture();
@@ -196,6 +229,7 @@ export class RemoteControlClient {
     this.isDisconnected = true;
     this.reconnectInProgress = false;
     this.stopReconnectTimer();
+    this.stopRemoteTrackWatchdog();
     this.stopNetworkRecoveryTimer();
     this.unregisterNetworkRecoveryHandlers();
     this.stopSessionHeartbeat();
@@ -226,6 +260,7 @@ export class RemoteControlClient {
     this.options.onStats?.(undefined);
     this.options.onLocalStream(undefined);
     this.options.onRemoteStream(undefined);
+    this.transitionLifecycle("disconnected");
     this.reportStatus("SIGNALING_DISCONNECTED", "Disconnected");
   }
 
@@ -320,6 +355,7 @@ export class RemoteControlClient {
       let offset = 0;
       let index = 0;
       let checksum = createFileTransferChecksum();
+      this.reportFileTransferProgress("outgoing", transferId, file.name, 0, file.size);
 
       while (offset < file.size) {
         this.ensureFileTransferChannelOpen(channel);
@@ -338,6 +374,7 @@ export class RemoteControlClient {
         this.sendFileTransferMessage(channel, chunkMessage);
         offset += chunk.size;
         index += 1;
+        this.reportFileTransferProgress("outgoing", transferId, file.name, offset, file.size);
         onProgress?.(Math.min(100, Math.round((offset / file.size) * 100)));
         await waitForChannelDrain(channel);
         this.throwIfOutgoingTransferAborted(transferId);
@@ -363,6 +400,7 @@ export class RemoteControlClient {
 
   private registerSocketHandlers(socket: ClientSocket): void {
     socket.on("connect", () => {
+      this.transitionLifecycle("signaling-connected");
       this.reportStatus("SIGNALING_CONNECTED", `Connected as ${this.options.role}`, {
         role: this.options.role
       });
@@ -433,6 +471,7 @@ export class RemoteControlClient {
 
     socket.on("session:joined", (peer) => {
       this.peerClientId = peer.clientId;
+      this.transitionLifecycle("peer-announced");
       this.options.onPeer(peer);
 
       if (this.options.role === "host") {
@@ -486,6 +525,7 @@ export class RemoteControlClient {
       return;
     }
 
+    this.transitionLifecycle("join-requested");
     if (typeof password === "string") {
       this.lastSessionPassword = password;
     }
@@ -506,6 +546,7 @@ export class RemoteControlClient {
 
   private async handleJoinResponse(response: JoinSessionResponse): Promise<void> {
     if ("clientId" in response) {
+      this.transitionLifecycle("join-succeeded");
       this.reportStatus("SESSION_JOINED", `Joined session ${this.options.sessionId} as ${response.clientId}`, {
         sessionId: this.options.sessionId,
         clientId: response.clientId
@@ -570,7 +611,7 @@ export class RemoteControlClient {
       throw new Error("Selected source did not provide a video track");
     }
 
-    nextVideoTrack.contentHint = this.options.captureMode === "game" ? "motion" : "detail";
+    nextVideoTrack.contentHint = "motion";
 
     const sender = peerConnection.getSenders().find((candidate) => candidate.track?.kind === "video");
     if (sender) {
@@ -633,6 +674,7 @@ export class RemoteControlClient {
         stream.addTrack(event.track);
       }
 
+      this.stopRemoteTrackWatchdog();
       this.options.onRemoteStream(stream);
       event.track.onended = () => {
         if (!this.remoteStream) {
@@ -643,6 +685,7 @@ export class RemoteControlClient {
         if (nextTracks.length === 0) {
           this.remoteStream = undefined;
           this.options.onRemoteStream(undefined);
+          this.scheduleRemoteTrackWatchdog();
           return;
         }
 
@@ -659,12 +702,29 @@ export class RemoteControlClient {
       }
 
       if (peerConnection.connectionState === "connected") {
+        this.transitionLifecycle("webrtc-connected");
         this.stopReconnectTimer();
         this.reconnectInProgress = false;
         this.startStatsPolling();
+        this.scheduleRemoteTrackWatchdog();
       }
 
       if (peerConnection.connectionState === "failed" || peerConnection.connectionState === "disconnected") {
+        this.scheduleReconnect();
+      }
+    };
+
+    peerConnection.oniceconnectionstatechange = () => {
+      const iceConnectionState = peerConnection.iceConnectionState;
+      this.reportStatus("WEBRTC_STATE", `ICE state: ${iceConnectionState}`, {
+        iceConnectionState
+      });
+
+      if (iceConnectionState === "connected" || iceConnectionState === "completed") {
+        this.scheduleRemoteTrackWatchdog();
+      }
+
+      if (iceConnectionState === "failed" || iceConnectionState === "disconnected") {
         this.scheduleReconnect();
       }
     };
@@ -819,6 +879,7 @@ export class RemoteControlClient {
   private resetPeerConnection(): void {
     this.stopStatsPolling();
     this.stopReconnectTimer();
+    this.stopRemoteTrackWatchdog();
     this.controlChannel?.close();
     this.peerConnection?.close();
     this.controlChannel = undefined;
@@ -828,6 +889,7 @@ export class RemoteControlClient {
     this.audioTransceiver = undefined;
     this.pendingCandidates.length = 0;
     this.previousStatsSample = undefined;
+    this.transitionLifecycle("peer-reset");
     this.options.onRemoteStream(undefined);
   }
 
@@ -938,6 +1000,7 @@ export class RemoteControlClient {
       return;
     }
 
+    this.transitionLifecycle("recovery-started");
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (this.isDisconnected || !this.peerClientId || this.reconnectInProgress) {
@@ -980,18 +1043,16 @@ export class RemoteControlClient {
     }
 
     if (this.options.role === "host") {
-      if (!this.localStream) {
-        await this.startDesktopCapture();
-      } else {
-        const peerConnection = this.ensurePeerConnection();
-        for (const track of this.localStream.getTracks()) {
-          peerConnection.addTrack(track, this.localStream);
-        }
-      }
+      await this.startDesktopCapture();
 
       if (!this.isDisconnected && this.socket?.connected) {
         await this.createOffer(peerClientId);
       }
+      return;
+    }
+
+    if (this.socket?.connected) {
+      this.joinSession(this.lastSessionPassword);
     }
   }
 
@@ -1110,6 +1171,7 @@ export class RemoteControlClient {
       size: safeSize,
       transferId: message.transferId
     });
+    this.reportFileTransferProgress("incoming", message.transferId, message.name, 0, safeSize);
   }
 
   private appendIncomingFileChunk(message: FileTransferChunkMessage): void {
@@ -1142,6 +1204,13 @@ export class RemoteControlClient {
         transfer.checksum = updateFileTransferChecksum(transfer.checksum, chunk);
         transfer.nextChunkIndex += 1;
         this.refreshIncomingTransferTimeout(message.transferId, transfer);
+        this.reportFileTransferProgress(
+          "incoming",
+          message.transferId,
+          transfer.name,
+          transfer.receivedBytes,
+          transfer.size
+        );
       });
     transfer.queue.catch((error) => this.failIncomingFileTransfer(message.transferId, getErrorMessage(error)));
   }
@@ -1198,6 +1267,10 @@ export class RemoteControlClient {
   }
 
   private failIncomingFileTransfer(transferId: string, reason: string): void {
+    this.failIncomingFileTransferInternal(transferId, reason, true);
+  }
+
+  private failIncomingFileTransferInternal(transferId: string, reason: string, notifyPeer: boolean): void {
     const transfer = this.incomingTransfers.get(transferId);
     if (!transfer || transfer.failed) {
       return;
@@ -1207,7 +1280,9 @@ export class RemoteControlClient {
     this.incomingTransfers.delete(transferId);
     this.clearIncomingTransferTimeout(transfer);
     void window.remoteControl.abortIncomingFileTransfer(transferId);
-    this.sendFileTransferAbort(this.controlChannel, transferId, reason);
+    if (notifyPeer) {
+      this.sendFileTransferAbort(this.controlChannel, transferId, reason);
+    }
     this.reportStatus("FILE_TRANSFER_FAILED", `File transfer failed: ${transfer.name}: ${reason}`, {
       name: transfer.name,
       transferId,
@@ -1225,6 +1300,7 @@ export class RemoteControlClient {
     this.incomingTransfers.clear();
     for (const [transferId, transfer] of transfers) {
       this.clearIncomingTransferTimeout(transfer);
+      void window.remoteControl.abortIncomingFileTransfer(transferId);
       this.sendFileTransferAbort(this.controlChannel, transferId, reason);
     }
     this.reportStatus("FILE_TRANSFER_INTERRUPTED", `${reason}: ${interruptedCount} file${interruptedCount === 1 ? "" : "s"}`, {
@@ -1234,7 +1310,7 @@ export class RemoteControlClient {
 
   private handleFileTransferAbort(message: FileTransferAbortMessage): void {
     if (this.incomingTransfers.has(message.transferId)) {
-      this.failIncomingFileTransfer(message.transferId, message.reason ?? "Transfer aborted by sender");
+      this.failIncomingFileTransferInternal(message.transferId, message.reason ?? "Transfer aborted by sender", false);
       return;
     }
 
@@ -1259,6 +1335,53 @@ export class RemoteControlClient {
     }
   }
 
+  private scheduleRemoteTrackWatchdog(): void {
+    if (
+      this.options.role !== "viewer"
+      || this.isDisconnected
+      || this.lifecycleState !== "peer-connected"
+      || this.hasActiveRemoteTracks()
+    ) {
+      this.stopRemoteTrackWatchdog();
+      return;
+    }
+
+    if (this.remoteTrackWatchdogTimer) {
+      return;
+    }
+
+    this.remoteTrackWatchdogTimer = setTimeout(() => {
+      this.remoteTrackWatchdogTimer = undefined;
+      if (
+        this.options.role !== "viewer"
+        || this.isDisconnected
+        || this.lifecycleState !== "peer-connected"
+        || this.hasActiveRemoteTracks()
+      ) {
+        return;
+      }
+
+      this.reportStatus("WEBRTC_RECONNECT_FAILED", "Remote stream did not recover, requesting a fresh session join");
+      if (this.socket?.connected) {
+        this.joinSession(this.lastSessionPassword);
+        return;
+      }
+
+      this.scheduleReconnect();
+    }, 4_000);
+  }
+
+  private stopRemoteTrackWatchdog(): void {
+    if (this.remoteTrackWatchdogTimer) {
+      clearTimeout(this.remoteTrackWatchdogTimer);
+      this.remoteTrackWatchdogTimer = undefined;
+    }
+  }
+
+  private hasActiveRemoteTracks(): boolean {
+    return Boolean(this.remoteStream?.getTracks().some((track) => track.readyState !== "ended"));
+  }
+
   private throwIfOutgoingTransferAborted(transferId: string): void {
     const reason = this.outgoingTransferAbortReasons.get(transferId);
     if (reason) {
@@ -1279,6 +1402,39 @@ export class RemoteControlClient {
     };
 
     channel.send(JSON.stringify(message));
+  }
+
+  private reportFileTransferProgress(
+    direction: "incoming" | "outgoing",
+    transferId: string,
+    name: string,
+    bytesTransferred: number,
+    totalBytes: number
+  ): void {
+    if (!this.options.onFileTransferProgress) {
+      return;
+    }
+
+    const safeTotalBytes = Math.max(0, totalBytes);
+    const boundedTransferred = safeTotalBytes > 0
+      ? clamp(bytesTransferred, 0, safeTotalBytes)
+      : Math.max(0, bytesTransferred);
+    const progress = safeTotalBytes > 0
+      ? Math.round((boundedTransferred / safeTotalBytes) * 100)
+      : 100;
+
+    this.options.onFileTransferProgress({
+      direction,
+      name,
+      transferId,
+      bytesTransferred: boundedTransferred,
+      totalBytes: safeTotalBytes,
+      progress
+    });
+  }
+
+  private transitionLifecycle(event: SessionLifecycleEvent): void {
+    this.lifecycleState = reduceSessionLifecycleState(this.lifecycleState, event);
   }
 
   private reportStatus(
@@ -1416,7 +1572,7 @@ export class RemoteControlClient {
       return;
     }
 
-    const preferred = ["VP9", "H264", "VP8"];
+    const preferred = ["H264", "VP9", "VP8"];
     const sorted = [
       ...preferred.flatMap((name) => codecs.filter((c) => c.mimeType.toUpperCase().includes(name))),
       ...codecs.filter((c) => !preferred.some((name) => c.mimeType.toUpperCase().includes(name)))
@@ -1618,6 +1774,49 @@ export function parseDataChannelMessage(value: unknown): DataChannelMessage | un
   } catch {
     return undefined;
   }
+}
+
+export function reduceSessionLifecycleState(
+  current: SessionLifecycleState,
+  event: SessionLifecycleEvent
+): SessionLifecycleState {
+  if (event === "disconnected") {
+    return "disconnected";
+  }
+
+  if (event === "connect-requested") {
+    return "signaling-connecting";
+  }
+
+  if (event === "signaling-connected") {
+    return "signaling-connected";
+  }
+
+  if (event === "join-requested") {
+    return "joining-session";
+  }
+
+  if (event === "join-succeeded") {
+    return "session-joined";
+  }
+
+  if (event === "peer-announced") {
+    return current === "peer-connected" ? current : "peer-connecting";
+  }
+
+  if (event === "webrtc-connected") {
+    return "peer-connected";
+  }
+
+  if (event === "recovery-started") {
+    return "recovering";
+  }
+
+  if (event === "peer-reset") {
+    return current === "disconnected" ? current : "session-joined";
+  }
+
+  return current;
 }
 
 export function sanitizeDataChannelMessage(value: unknown): DataChannelMessage | undefined {
