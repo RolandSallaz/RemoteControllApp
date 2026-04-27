@@ -116,6 +116,15 @@ export const REMOTE_CONTROL_DISCOVERY_PORT = 38761;
 export const REMOTE_CONTROL_DISCOVERY_REQUEST = "remote-control.discovery.request";
 export const REMOTE_CONTROL_DISCOVERY_RESPONSE = "remote-control.discovery.response";
 
+export type DiscoveryNetworkInterface = {
+  address: string;
+  family: string | number;
+  internal: boolean;
+  netmask?: string | null;
+};
+
+export type DiscoveryNetworkInterfaces = Record<string, DiscoveryNetworkInterface[] | undefined>;
+
 export type DiscoveryRequest = {
   type: typeof REMOTE_CONTROL_DISCOVERY_REQUEST;
   version: 1;
@@ -138,6 +147,51 @@ export type DiscoveryResponse = {
   port: number;
   url?: string;
 };
+
+export function getDiscoveryBroadcastAddresses(interfaces: DiscoveryNetworkInterfaces): string[] {
+  const addresses = new Set<string>(["127.0.0.1", "255.255.255.255"]);
+
+  for (const networkInterface of Object.values(interfaces)) {
+    for (const entry of networkInterface ?? []) {
+      if (!isDiscoveryIpv4Interface(entry)) {
+        continue;
+      }
+
+      addresses.add(toDiscoveryBroadcastAddress(entry.address, entry.netmask));
+    }
+  }
+
+  return [...addresses];
+}
+
+export function toDiscoveryBroadcastAddress(address: string, netmask: string): string {
+  const addressParts = parseIpv4Address(address);
+  const maskParts = parseIpv4Address(netmask);
+
+  if (!addressParts || !maskParts) {
+    return "255.255.255.255";
+  }
+
+  return addressParts.map((part, index) => (part | (~maskParts[index] & 255)) & 255).join(".");
+}
+
+function isDiscoveryIpv4Interface(entry: DiscoveryNetworkInterface): entry is DiscoveryNetworkInterface & { netmask: string } {
+  return isIpv4Family(entry.family) && !entry.internal && Boolean(entry.netmask) && Boolean(parseIpv4Address(entry.address));
+}
+
+function isIpv4Family(family: string | number): boolean {
+  return family === "IPv4" || family === 4;
+}
+
+function parseIpv4Address(value: string): number[] | undefined {
+  const parts = value.split(".");
+  if (parts.length !== 4) {
+    return undefined;
+  }
+
+  const parsed = parts.map((part) => Number(part));
+  return parsed.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) ? parsed : undefined;
+}
 
 export type ControlPointerEvent =
   | {

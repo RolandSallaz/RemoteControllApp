@@ -2,9 +2,11 @@ import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
 
 import {
+  getDiscoveryBroadcastAddresses,
   REMOTE_CONTROL_DISCOVERY_PORT,
   REMOTE_CONTROL_DISCOVERY_REQUEST,
   REMOTE_CONTROL_DISCOVERY_RESPONSE,
+  toDiscoveryBroadcastAddress,
   type DiscoveredServer,
   type DiscoveryRequest,
   type DiscoveryResponse
@@ -13,28 +15,72 @@ import {
 type DiscoverySocketLike = {
   bind: (port: number, callback: () => void) => void;
   close: () => void;
-  on: (event: "message", listener: (message: Buffer, remote: { address: string }) => void) => void;
+  on: {
+    (event: "message", listener: (message: Buffer, remote: { address: string }) => void): void;
+    (event: "error", listener: (error: Error) => void): void;
+  };
   send: (payload: Buffer, port: number, address: string) => void;
   setBroadcast: (enabled: boolean) => void;
 };
 
 type DiscoverServersOptions = {
-  createSocket?: (type: "udp4") => DiscoverySocketLike;
+  createSocket?: (options: DiscoverySocketOptions) => DiscoverySocketLike;
   getBroadcastAddresses?: () => string[];
   now?: () => number;
   scheduleTimeout?: (callback: () => void, timeoutMs: number) => void;
 };
 
+type DiscoverySocketOptions = "udp4" | { type: "udp4"; reuseAddr: boolean };
+
 export async function discoverServers(
   timeoutMs = 1400,
   {
-    createSocket: createDiscoverySocket = createSocket,
+    createSocket: createDiscoverySocket = createDefaultDiscoverySocket,
     getBroadcastAddresses: resolveBroadcastAddresses = getBroadcastAddresses,
     now = Date.now,
     scheduleTimeout = setTimeout
   }: DiscoverServersOptions = {}
 ): Promise<DiscoveredServer[]> {
-  const socket = createDiscoverySocket("udp4");
+  try {
+    return await runDiscoveryScan(timeoutMs, {
+      bindPort: REMOTE_CONTROL_DISCOVERY_PORT,
+      createDiscoverySocket,
+      resolveBroadcastAddresses,
+      now,
+      scheduleTimeout,
+      socketOptions: { type: "udp4", reuseAddr: true }
+    });
+  } catch {
+    return await runDiscoveryScan(timeoutMs, {
+      bindPort: 0,
+      createDiscoverySocket,
+      resolveBroadcastAddresses,
+      now,
+      scheduleTimeout,
+      socketOptions: "udp4"
+    });
+  }
+}
+
+function runDiscoveryScan(
+  timeoutMs: number,
+  {
+    bindPort,
+    createDiscoverySocket,
+    resolveBroadcastAddresses,
+    now,
+    scheduleTimeout,
+    socketOptions
+  }: {
+    bindPort: number;
+    createDiscoverySocket: (options: DiscoverySocketOptions) => DiscoverySocketLike;
+    resolveBroadcastAddresses: () => string[];
+    now: () => number;
+    scheduleTimeout: (callback: () => void, timeoutMs: number) => void;
+    socketOptions: DiscoverySocketOptions;
+  }
+): Promise<DiscoveredServer[]> {
+  const socket = createDiscoverySocket(socketOptions);
   const servers = new Map<string, DiscoveredServer>();
 
   const request: DiscoveryRequest = {
@@ -43,9 +89,21 @@ export async function discoverServers(
   };
   const payload = Buffer.from(JSON.stringify(request));
 
-  return await new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    let bound = false;
+    let finished = false;
+
     const finish = (): void => {
-      socket.close();
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      try {
+        socket.close();
+      } catch {
+        // Socket may already be closed after a bind error.
+      }
       resolve([...servers.values()].sort((a, b) => a.name.localeCompare(b.name)));
     };
 
@@ -67,7 +125,28 @@ export async function discoverServers(
       });
     });
 
-    socket.bind(0, () => {
+    socket.on("error", (error) => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      try {
+        socket.close();
+      } catch {
+        // Socket may already be closed after a bind error.
+      }
+
+      if (!bound) {
+        reject(error);
+        return;
+      }
+
+      resolve([...servers.values()].sort((a, b) => a.name.localeCompare(b.name)));
+    });
+
+    socket.bind(bindPort, () => {
+      bound = true;
       socket.setBroadcast(true);
       for (const address of resolveBroadcastAddresses()) {
         socket.send(payload, REMOTE_CONTROL_DISCOVERY_PORT, address);
@@ -76,6 +155,10 @@ export async function discoverServers(
       scheduleTimeout(finish, timeoutMs);
     });
   });
+}
+
+function createDefaultDiscoverySocket(options: DiscoverySocketOptions): DiscoverySocketLike {
+  return typeof options === "string" ? createSocket(options) : createSocket(options);
 }
 
 export function parseDiscoveryResponse(message: Buffer): DiscoveryResponse | undefined {
@@ -94,23 +177,9 @@ export function parseDiscoveryResponse(message: Buffer): DiscoveryResponse | und
 export function getBroadcastAddresses(
   interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()
 ): string[] {
-  const addresses = new Set<string>(["127.0.0.1", "255.255.255.255"]);
-
-  for (const networkInterface of Object.values(interfaces)) {
-    for (const entry of networkInterface ?? []) {
-      if (entry.family !== "IPv4" || entry.internal || !entry.netmask) {
-        continue;
-      }
-
-      addresses.add(toBroadcastAddress(entry.address, entry.netmask));
-    }
-  }
-
-  return [...addresses];
+  return getDiscoveryBroadcastAddresses(interfaces);
 }
 
 export function toBroadcastAddress(address: string, netmask: string): string {
-  const addressParts = address.split(".").map(Number);
-  const maskParts = netmask.split(".").map(Number);
-  return addressParts.map((part, index) => (part | (~maskParts[index] & 255)) & 255).join(".");
+  return toDiscoveryBroadcastAddress(address, netmask);
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.8 - 2026-04-27
+
+- Improved LAN server discovery when the host is connected to a VPN by adding server announcements and a client fallback scan mode.
+
 ## v0.2.7 - 2026-04-27
 
 - Improved Windows installer options with install directory selection, desktop shortcut selection and run-after-install behavior.

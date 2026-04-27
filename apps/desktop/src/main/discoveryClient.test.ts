@@ -69,14 +69,16 @@ test("discoverServers broadcasts discovery requests and collects sorted unique s
   const promise = discoverServers(250, {
     createSocket: () => ({
       bind: (port, callback) => {
-        assert.equal(port, 0);
+        assert.equal(port, REMOTE_CONTROL_DISCOVERY_PORT);
         callback();
       },
       close: () => {
         closed = true;
       },
-      on: (_event, listener) => {
-        messageListener = listener;
+      on: (event, listener) => {
+        if (event === "message") {
+          messageListener = listener as (message: Buffer, remote: { address: string }) => void;
+        }
       },
       send: (payload, port, address) => {
         sent.push({
@@ -162,4 +164,53 @@ test("discoverServers broadcasts discovery requests and collects sorted unique s
     }
   ]);
   assert.equal(closed, true);
+});
+
+test("discoverServers falls back to direct request responses when the discovery port is unavailable", async () => {
+  const bindPorts: number[] = [];
+  const sent: Array<{ port: number; address: string }> = [];
+  let finishDiscovery: (() => void) | undefined;
+
+  const promise = discoverServers(250, {
+    createSocket: () => {
+      let errorListener: ((error: Error) => void) | undefined;
+
+      return {
+        bind: (port, callback) => {
+          bindPorts.push(port);
+
+          if (port === REMOTE_CONTROL_DISCOVERY_PORT) {
+            errorListener?.(new Error("port in use"));
+            return;
+          }
+
+          callback();
+        },
+        close: () => undefined,
+        on: (event, listener) => {
+          if (event === "error") {
+            errorListener = listener as (error: Error) => void;
+          }
+        },
+        send: (_payload, port, address) => {
+          sent.push({ port, address });
+        },
+        setBroadcast: () => undefined
+      };
+    },
+    getBroadcastAddresses: () => ["192.168.1.255"],
+    scheduleTimeout: (callback) => {
+      finishDiscovery = callback;
+    }
+  });
+
+  await Promise.resolve();
+  finishDiscovery?.();
+
+  assert.deepEqual(await promise, []);
+  assert.deepEqual(bindPorts, [REMOTE_CONTROL_DISCOVERY_PORT, 0]);
+  assert.deepEqual(sent, [{
+    port: REMOTE_CONTROL_DISCOVERY_PORT,
+    address: "192.168.1.255"
+  }]);
 });
