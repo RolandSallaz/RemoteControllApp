@@ -20,3 +20,7 @@ win:
     - nsis
 nsis:
   artifactName: RemoteControl-Server-${version}-Setup-${arch}.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  runAfterFinish: true
