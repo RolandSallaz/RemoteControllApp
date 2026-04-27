@@ -14,12 +14,14 @@ Download:
 - `RemoteControl Client` - install/run on the viewer PC.
 
 After starting the Server App, open the Client App and either select the discovered LAN server or enter the server URL manually.
+You can also open the server URL in a browser, for example `http://192.168.1.10:47315`, and connect as a web viewer.
 
 ## MVP Features
 
 - WebRTC desktop streaming.
 - Mouse and keyboard control.
 - LAN server discovery.
+- Browser-based viewer served by the host app.
 - Fullscreen viewer with draggable `RC` settings overlay.
 - Monitor switching.
 - Optional server password.

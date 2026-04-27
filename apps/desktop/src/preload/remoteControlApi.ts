@@ -47,6 +47,7 @@ export function createRemoteControlApi<TImage>({
 }: RemoteControlApiDependencies<TImage>) {
   return {
     appMode,
+    isBrowser: false,
     productName: getProductName(appMode),
     getDeviceName: () => ipcRenderer.invoke("app:get-device-name"),
     getBackendStatus: () => ipcRenderer.invoke("backend:status"),

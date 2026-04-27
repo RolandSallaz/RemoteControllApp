@@ -34,6 +34,7 @@ declare global {
   interface Window {
     remoteControl: {
       appMode: DesktopAppMode;
+      isBrowser?: boolean;
       productName: string;
       getDeviceName: () => Promise<string>;
       getBackendStatus: () => Promise<EmbeddedBackendStatus>;

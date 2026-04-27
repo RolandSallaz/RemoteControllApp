@@ -56,11 +56,11 @@ export class DiscoveryService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const payload = Buffer.from(JSON.stringify(this.createDiscoveryResponse()));
+    const payload = Buffer.from(JSON.stringify(this.getDiscoveryResponse()));
     this.socket?.send(payload, remote.port, remote.address);
   }
 
-  private createDiscoveryResponse(): DiscoveryResponse {
+  getDiscoveryResponse(): DiscoveryResponse {
     return {
       type: REMOTE_CONTROL_DISCOVERY_RESPONSE,
       version: 1,
@@ -72,7 +72,7 @@ export class DiscoveryService implements OnModuleInit, OnModuleDestroy {
   }
 
   private announcePresence(): void {
-    const payload = Buffer.from(JSON.stringify(this.createDiscoveryResponse()));
+    const payload = Buffer.from(JSON.stringify(this.getDiscoveryResponse()));
 
     for (const address of getDiscoveryBroadcastAddresses(networkInterfaces())) {
       this.socket?.send(payload, REMOTE_CONTROL_DISCOVERY_PORT, address);

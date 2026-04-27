@@ -4,6 +4,8 @@ import { test } from "node:test";
 import {
   discoverServers,
   getBroadcastAddresses,
+  getSubnetProbeAddresses,
+  getUnicastProbeAddresses,
   parseDiscoveryResponse,
   toBroadcastAddress
 } from "./discoveryClient.js";
@@ -92,6 +94,7 @@ test("discoverServers broadcasts discovery requests and collects sorted unique s
       }
     }),
     getBroadcastAddresses: () => ["192.168.1.255", "127.0.0.1"],
+    getProbeAddresses: () => [],
     now: () => 123456,
     scheduleTimeout: (callback, delayMs) => {
       assert.equal(delayMs, 250);
@@ -199,6 +202,7 @@ test("discoverServers falls back to direct request responses when the discovery 
       };
     },
     getBroadcastAddresses: () => ["192.168.1.255"],
+    getProbeAddresses: () => [],
     scheduleTimeout: (callback) => {
       finishDiscovery = callback;
     }
@@ -212,5 +216,71 @@ test("discoverServers falls back to direct request responses when the discovery 
   assert.deepEqual(sent, [{
     port: REMOTE_CONTROL_DISCOVERY_PORT,
     address: "192.168.1.255"
+  }]);
+});
+
+test("getUnicastProbeAddresses derives bounded host probes for small VPN subnets", () => {
+  assert.deepEqual(getSubnetProbeAddresses("10.8.0.2", "255.255.255.252", 16), [
+    "10.8.0.1",
+    "10.8.0.2"
+  ]);
+
+  const addresses = getUnicastProbeAddresses({
+    vpn: [
+      { address: "10.8.0.2", family: "IPv4", internal: false, netmask: "255.255.255.252" },
+      { address: "10.9.0.2", family: "IPv4", internal: false, netmask: "255.255.0.0" },
+      { address: "127.0.0.1", family: "IPv4", internal: true, netmask: "255.0.0.0" }
+    ]
+  } as ReturnType<typeof import("node:os").networkInterfaces>, 16);
+
+  assert.deepEqual(addresses, ["10.8.0.1"]);
+});
+
+test("discoverServers probes VPN peers over HTTP when broadcast discovery is unavailable", async () => {
+  const fetchedUrls: string[] = [];
+
+  const servers = await discoverServers(250, {
+    createSocket: () => ({
+      bind: (_port, callback) => {
+        callback();
+      },
+      close: () => undefined,
+      on: () => undefined,
+      send: () => undefined,
+      setBroadcast: () => undefined
+    }),
+    fetchDiscovery: async (url) => {
+      fetchedUrls.push(url);
+      if (url !== "http://10.8.0.9:47315/discovery") {
+        return undefined;
+      }
+
+      return {
+        type: REMOTE_CONTROL_DISCOVERY_RESPONSE,
+        version: 1,
+        id: "vpn-host",
+        name: "VPN Host",
+        port: 47315
+      };
+    },
+    getBroadcastAddresses: () => [],
+    getProbeAddresses: () => ["10.8.0.8", "10.8.0.9"],
+    now: () => 123456,
+    scheduleTimeout: (callback) => {
+      callback();
+    }
+  });
+
+  assert.deepEqual(fetchedUrls.sort(), [
+    "http://10.8.0.8:47315/discovery",
+    "http://10.8.0.9:47315/discovery"
+  ]);
+  assert.deepEqual(servers, [{
+    id: "vpn-host",
+    name: "VPN Host",
+    address: "10.8.0.9",
+    port: 47315,
+    url: "http://10.8.0.9:47315",
+    lastSeen: 123456
   }]);
 });

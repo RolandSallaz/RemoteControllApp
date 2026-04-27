@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.9 - 2026-04-27
+
+- Add browser-based viewer served by the host app. Add HTTP discovery endpoint and LAN fallback probing.
+
 ## v0.2.8 - 2026-04-27
 
 - Improved LAN server discovery when the host is connected to a VPN by adding server announcements and a client fallback scan mode.

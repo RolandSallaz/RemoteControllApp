@@ -15,6 +15,7 @@ import type {
 } from "@remote-control/shared";
 
 import type { DesktopCaptureSource, EmbeddedBackendStatus, ViewerSettings } from "./env";
+import { ensureRemoteControlApi, getBrowserDefaultServerUrl } from "./browserRemoteControl";
 import {
   type CaptureMode,
   type FrameRate
@@ -35,7 +36,9 @@ import { useServerDiscovery } from "./hooks/useServerDiscovery";
 import { useWebRTC } from "./hooks/useWebRTC";
 import { isEditableTarget, isKeyboardShortcut } from "./hotkeys";
 
-const defaultServerUrl = "http://localhost:47315";
+ensureRemoteControlApi();
+
+const defaultServerUrl = getBrowserDefaultServerUrl();
 const defaultSessionId = "LAN";
 const appMode = window.remoteControl.appMode;
 const isSettingsPage = new URLSearchParams(window.location.search).get("page") === "host-settings";
