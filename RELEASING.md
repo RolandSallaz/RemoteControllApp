@@ -8,6 +8,24 @@ Build both Windows executables and prepare release assets:
 npm run build:release
 ```
 
+The Windows installer uses the app icons from `apps/desktop/build/`. If the
+icons need to be regenerated, run:
+
+```bash
+npm run generate:icons --workspace @remote-control/desktop
+```
+
+On Windows, electron-builder may need permission to create symlinks while
+extracting `winCodeSign`. If a local build fails with `Cannot create symbolic
+link`, enable Windows Developer Mode or run the shell with elevated privileges.
+For local NSIS smoke checks that do not need executable signing, package with:
+
+```bash
+cd apps/desktop
+npx electron-builder --config electron-builder.server.yml --config.win.signAndEditExecutable=false --win nsis --publish never
+npx electron-builder --config electron-builder.client.yml --config.win.signAndEditExecutable=false --win nsis --publish never
+```
+
 The prepared assets will be collected in:
 
 ```text

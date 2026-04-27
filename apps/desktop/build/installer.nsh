@@ -14,7 +14,7 @@
         Abort
       ${endif}
 
-      !insertmacro MUI_HEADER_TEXT "Additional tasks" "Choose extra setup tasks."
+      !insertmacro MUI_HEADER_TEXT "Дополнительные задачи" "Выберите дополнительные действия перед установкой."
       nsDialogs::Create 1018
       Pop $0
 
@@ -22,7 +22,7 @@
         Abort
       ${EndIf}
 
-      ${NSD_CreateCheckbox} 0 0u 100% 12u "Create a desktop shortcut"
+      ${NSD_CreateCheckbox} 0 0u 100% 12u "Создать ярлык на рабочем столе"
       Pop $RemoteControlDesktopShortcutCheckbox
 
       ${If} $RemoteControlDesktopShortcutState == ${BST_CHECKED}

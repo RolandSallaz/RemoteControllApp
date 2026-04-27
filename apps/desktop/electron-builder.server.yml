@@ -2,6 +2,8 @@ appId: dev.remote-control.server
 productName: RemoteControl Server
 artifactName: RemoteControl-Server-${version}-windows-${arch}.${ext}
 electronUpdaterCompatibility: ">=2.16"
+extraMetadata:
+  description: RemoteControl host app
 directories:
   output: release-server
 files:
@@ -16,10 +18,16 @@ publish:
   channel: server
 win:
   signAndEditExecutable: true
+  icon: build/icon.ico
   target:
     - nsis
 nsis:
   artifactName: RemoteControl-Server-${version}-Setup-${arch}.${ext}
+  installerIcon: installerIcon.ico
+  uninstallerIcon: uninstallerIcon.ico
+  installerLanguages:
+    - ru_RU
+  language: "1049"
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true

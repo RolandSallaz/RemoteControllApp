@@ -86,7 +86,8 @@ npm run build:desktop-apps
 Artifacts are written to:
 
 ```text
-apps/desktop/release/
+apps/desktop/release-server/
+apps/desktop/release-client/
 ```
 
 ## Project Structure

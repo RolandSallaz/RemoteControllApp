@@ -113,6 +113,8 @@ test("configureAutoUpdate prompts to restart after a downloaded update", async (
     scheduleUpdateCheck: () => undefined
   });
 
+  assert.equal(updater.autoUpdater.channel, "client");
+
   await updater.emit("update-downloaded", { version: "0.2.7" });
 
   assert.deepEqual(dialogs, [{
@@ -120,4 +122,35 @@ test("configureAutoUpdate prompts to restart after a downloaded update", async (
     detail: "Version 0.2.7 is ready to install. Restart now to apply it."
   }]);
   assert.equal(updater.getInstallCalls(), 1);
+});
+
+test("configureAutoUpdate keeps a downloaded host update staged when restart is postponed", async () => {
+  const updater = createAutoUpdaterDouble();
+  const dialogs: Array<{ title: string; detail: string }> = [];
+
+  configureAutoUpdate({
+    app: { isPackaged: true },
+    appMode: "host",
+    autoUpdater: updater.autoUpdater,
+    dialog: {
+      showMessageBox: async (options) => {
+        dialogs.push({ title: options.title, detail: options.detail });
+        return { response: 1 };
+      }
+    },
+    isDev: false,
+    scheduleUpdateCheck: () => undefined
+  });
+
+  assert.equal(updater.autoUpdater.channel, "server");
+  assert.equal(updater.autoUpdater.autoDownload, true);
+  assert.equal(updater.autoUpdater.autoInstallOnAppQuit, true);
+
+  await updater.emit("update-downloaded", { version: "0.2.7" });
+
+  assert.deepEqual(dialogs, [{
+    title: "RemoteControl Server",
+    detail: "Version 0.2.7 is ready to install. Restart now to apply it."
+  }]);
+  assert.equal(updater.getInstallCalls(), 0);
 });

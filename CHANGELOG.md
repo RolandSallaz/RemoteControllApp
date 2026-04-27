@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.7 - 2026-04-27
+
+- Improved Windows installer options with install directory selection, desktop shortcut selection and run-after-install behavior.
+- Added packaged app icons and a reproducible icon generation script.
+- Documented local installer smoke checks and covered downloaded update prompts for host and viewer builds.
+
 ## Unreleased
 
 ## v0.2.6 - 2026-04-23
