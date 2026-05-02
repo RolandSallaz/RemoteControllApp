@@ -196,6 +196,7 @@ function parseIpv4Address(value: string): number[] | undefined {
 export type ControlPointerEvent =
   | {
       type: "move";
+      sourceId?: string;
       x: number;
       y: number;
       screenWidth: number;
@@ -204,6 +205,7 @@ export type ControlPointerEvent =
   | {
       type: "click";
       button: "left" | "middle" | "right";
+      sourceId?: string;
       x: number;
       y: number;
       screenWidth: number;
@@ -237,6 +239,7 @@ export type ControlMessage =
     };
 
 export type HostSource = {
+  displayId?: string;
   id: string;
   name: string;
 };

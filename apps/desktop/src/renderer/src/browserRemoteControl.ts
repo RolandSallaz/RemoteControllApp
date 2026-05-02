@@ -21,7 +21,8 @@ const defaultViewerSettings: ViewerSettings = {
   disconnectShortcut: "Ctrl+Alt+Shift+D",
   frameRate: 30,
   receiveAudio: true,
-  switchMonitorShortcut: "Ctrl+Alt+Shift+M"
+  switchMonitorShortcut: "Ctrl+Alt+Shift+M",
+  takeControl: true
 };
 
 const incomingTransfers = new Map<string, BrowserIncomingTransfer>();

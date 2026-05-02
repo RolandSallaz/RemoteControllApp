@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import type { HostSettings, UpdateHostSettingsPayload } from "@remote-control/shared";
+import type { ControlMessage, HostSettings, UpdateHostSettingsPayload } from "@remote-control/shared";
 
 import { discoverServers } from "./discoveryClient.js";
 import {
@@ -98,10 +98,32 @@ type DesktopCapturerLike = {
     thumbnailSize: { height: number; width: number };
     types: Array<"screen" | "window">;
   }) => Promise<Array<{
+    display_id?: string;
     id: string;
     name: string;
     thumbnail: { toDataURL: () => string };
   }>>;
+};
+
+type DesktopCaptureSourceInfo = {
+  displayId?: string;
+  id: string;
+  name: string;
+  thumbnail: string;
+};
+
+type DisplayLike = {
+  bounds: {
+    height: number;
+    width: number;
+    x: number;
+    y: number;
+  };
+  id: number;
+};
+
+type ScreenLike = {
+  getAllDisplays: () => DisplayLike[];
 };
 
 type NativeImageLike = {
@@ -125,7 +147,8 @@ export const defaultViewerSettings: ViewerSettings = {
   disconnectShortcut: "Ctrl+Alt+Shift+D",
   frameRate: 30,
   receiveAudio: true,
-  switchMonitorShortcut: "Ctrl+Alt+Shift+M"
+  switchMonitorShortcut: "Ctrl+Alt+Shift+M",
+  takeControl: true
 };
 
 export function buildAppProfilePaths(appDataPath: string, productName: string, isDev: boolean): AppProfilePaths {
@@ -549,19 +572,24 @@ export function registerDirectIpcHandlers(options: {
   discoverServers: typeof discoverServers;
   getEmbeddedBackendStatus: typeof getEmbeddedBackendStatus;
   ipcMain: IpcMainLike;
+  screen: ScreenLike;
   sanitizeControlMessage: typeof sanitizeControlMessage;
 }): void {
+  const desktopSourcesById = new Map<string, DesktopCaptureSourceInfo>();
+
   options.ipcMain.handle("desktop:get-sources", async () => {
     const sources = await options.desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: { width: 360, height: 220 }
     });
 
-    return sources.map((source) => ({
-      id: source.id,
-      name: source.name,
-      thumbnail: source.thumbnail.toDataURL()
-    }));
+    const mappedSources = sources.map(toDesktopCaptureSourceInfo);
+    desktopSourcesById.clear();
+    for (const source of mappedSources) {
+      desktopSourcesById.set(source.id, source);
+    }
+
+    return mappedSources;
   });
 
   options.ipcMain.handle("control:message", async (_event, message: unknown) => {
@@ -571,7 +599,10 @@ export function registerDirectIpcHandlers(options: {
     }
 
     try {
-      await options.applyHostControl(controlMessage);
+      await options.applyHostControl(mapControlMessageToDisplay(controlMessage, {
+        displays: options.screen.getAllDisplays(),
+        sourcesById: desktopSourcesById
+      }));
       return { ok: true };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -586,6 +617,61 @@ export function registerDirectIpcHandlers(options: {
   });
 }
 
+export function mapControlMessageToDisplay(
+  message: ControlMessage,
+  options: {
+    displays: DisplayLike[];
+    sourcesById: ReadonlyMap<string, DesktopCaptureSourceInfo>;
+  }
+): ControlMessage {
+  if (message.kind !== "pointer" || message.event.type === "scroll" || !message.event.sourceId) {
+    return message;
+  }
+
+  const source = options.sourcesById.get(message.event.sourceId);
+  if (!source?.displayId) {
+    return message;
+  }
+
+  const display = options.displays.find((candidate) => String(candidate.id) === source.displayId);
+  if (
+    !display
+    || display.bounds.width <= 0
+    || display.bounds.height <= 0
+    || message.event.screenWidth <= 0
+    || message.event.screenHeight <= 0
+  ) {
+    return message;
+  }
+
+  const xScale = display.bounds.width / message.event.screenWidth;
+  const yScale = display.bounds.height / message.event.screenHeight;
+  return {
+    kind: "pointer",
+    event: {
+      ...message.event,
+      x: Math.round(display.bounds.x + message.event.x * xScale),
+      y: Math.round(display.bounds.y + message.event.y * yScale),
+      screenWidth: display.bounds.width,
+      screenHeight: display.bounds.height
+    }
+  };
+}
+
+function toDesktopCaptureSourceInfo(source: {
+  display_id?: string;
+  id: string;
+  name: string;
+  thumbnail: { toDataURL: () => string };
+}): DesktopCaptureSourceInfo {
+  return {
+    ...(source.display_id ? { displayId: source.display_id } : {}),
+    id: source.id,
+    name: source.name,
+    thumbnail: source.thumbnail.toDataURL()
+  };
+}
+
 const defaultScryptPromise = promisify(scryptCallback) as (
   password: string,
   salt: Buffer,
@@ -594,7 +680,7 @@ const defaultScryptPromise = promisify(scryptCallback) as (
 
 function runDesktopMain(): void {
   const electron = require("electron") as typeof import("electron");
-  const { app, BrowserWindow, Menu, Notification, Tray, desktopCapturer, dialog, ipcMain, nativeImage, shell } = electron;
+  const { app, BrowserWindow, Menu, Notification, Tray, desktopCapturer, dialog, ipcMain, nativeImage, screen, shell } = electron;
 
   const currentDir = dirname(fileURLToPath(import.meta.url));
   const isDev = Boolean(process.env.ELECTRON_RENDERER_URL);
@@ -804,6 +890,7 @@ function runDesktopMain(): void {
     registerDirectIpcHandlers({
       ipcMain,
       desktopCapturer,
+      screen,
       sanitizeControlMessage,
       applyHostControl,
       getEmbeddedBackendStatus,

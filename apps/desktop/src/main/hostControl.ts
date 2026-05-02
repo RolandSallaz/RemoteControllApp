@@ -103,9 +103,107 @@ export function mapMouseButton(nut: NutModule, button: "left" | "middle" | "righ
 }
 
 export function mapKeyboardKey(nut: NutModule, key: string, code: string): unknown {
-  const normalized = code.replace(/^Key/, "").replace(/^Digit/, "");
-  return nut.Key[normalized] ?? nut.Key[key.toUpperCase()] ?? nut.Key[key];
+  for (const candidate of getKeyboardKeyCandidates(key, code)) {
+    const mapped = nut.Key[candidate];
+    if (mapped !== undefined) {
+      return mapped;
+    }
+  }
+
+  return undefined;
 }
+
+function getKeyboardKeyCandidates(key: string, code: string): string[] {
+  if (code.startsWith("Key")) {
+    return [code.slice(3).toUpperCase()];
+  }
+
+  if (code.startsWith("Digit")) {
+    return [`Num${code.slice(5)}`, code.slice(5)];
+  }
+
+  if (/^F\d{1,2}$/.test(code)) {
+    return [code];
+  }
+
+  const mappedCode = keyboardCodeMap[code];
+  const candidates = Array.isArray(mappedCode) ? mappedCode : mappedCode ? [mappedCode] : [];
+  const normalizedKey = key.length === 1 ? key.toUpperCase() : key;
+  const upperKey = key.toUpperCase();
+
+  return [
+    ...candidates,
+    normalizedKey,
+    upperKey
+  ];
+}
+
+const keyboardCodeMap: Record<string, string | string[]> = {
+  AltLeft: "LeftAlt",
+  AltRight: "RightAlt",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  ArrowUp: "Up",
+  AudioVolumeDown: "AudioVolDown",
+  AudioVolumeMute: "AudioMute",
+  AudioVolumeUp: "AudioVolUp",
+  Backquote: "Grave",
+  Backslash: "Backslash",
+  Backspace: "Backspace",
+  BracketLeft: "LeftBracket",
+  BracketRight: "RightBracket",
+  CapsLock: "CapsLock",
+  Comma: "Comma",
+  ContextMenu: "Menu",
+  ControlLeft: "LeftControl",
+  ControlRight: "RightControl",
+  Delete: "Delete",
+  End: "End",
+  Enter: ["Return", "Enter"],
+  Equal: "Equal",
+  Escape: "Escape",
+  Fn: "Fn",
+  Home: "Home",
+  Insert: "Insert",
+  MediaPlayPause: "AudioPlay",
+  MediaTrackNext: "AudioNext",
+  MediaTrackPrevious: "AudioPrev",
+  MetaLeft: ["LeftWin", "LeftMeta", "LeftSuper", "LeftCmd"],
+  MetaRight: ["RightWin", "RightMeta", "RightSuper", "RightCmd"],
+  Minus: "Minus",
+  NumLock: "NumLock",
+  Numpad0: "NumPad0",
+  Numpad1: "NumPad1",
+  Numpad2: "NumPad2",
+  Numpad3: "NumPad3",
+  Numpad4: "NumPad4",
+  Numpad5: "NumPad5",
+  Numpad6: "NumPad6",
+  Numpad7: "NumPad7",
+  Numpad8: "NumPad8",
+  Numpad9: "NumPad9",
+  NumpadAdd: "Add",
+  NumpadDecimal: "Decimal",
+  NumpadDivide: "Divide",
+  NumpadEnter: "Enter",
+  NumpadEqual: "NumPadEqual",
+  NumpadMultiply: "Multiply",
+  NumpadSubtract: "Subtract",
+  PageDown: "PageDown",
+  PageUp: "PageUp",
+  Pause: "Pause",
+  Period: "Period",
+  PrintScreen: "Print",
+  Quote: "Quote",
+  ScrollLock: "ScrollLock",
+  Semicolon: "Semicolon",
+  ShiftLeft: "LeftShift",
+  ShiftRight: "RightShift",
+  Slash: "Slash",
+  Space: "Space",
+  Tab: "Tab"
+};
 
 function loadNut(): Promise<NutModule> {
   nutPromise ??= loadFirstAvailableNutModule().catch((error: unknown) => {

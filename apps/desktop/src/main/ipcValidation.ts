@@ -7,6 +7,7 @@ export type ViewerSettingsPatch = {
   frameRate?: 15 | 30 | 60;
   receiveAudio?: boolean;
   switchMonitorShortcut?: string;
+  takeControl?: boolean;
 };
 
 export type HostPresencePayload = {
@@ -99,6 +100,9 @@ export function sanitizeViewerSettingsPayload(value: unknown): ViewerSettingsPat
   }
   if (typeof value.receiveAudio === "boolean") {
     sanitized.receiveAudio = value.receiveAudio;
+  }
+  if (typeof value.takeControl === "boolean") {
+    sanitized.takeControl = value.takeControl;
   }
   if (typeof value.switchMonitorShortcut === "string") {
     const shortcut = sanitizeString(value.switchMonitorShortcut, maxShortcutLength);
@@ -254,6 +258,7 @@ function sanitizeKeyboardMessage(value: Record<string, unknown>): ControlMessage
 }
 
 function sanitizePointerCoordinates(value: Record<string, unknown>): {
+  sourceId?: string;
   x: number;
   y: number;
   screenWidth: number;
@@ -272,7 +277,9 @@ function sanitizePointerCoordinates(value: Record<string, unknown>): {
 
   const screenWidth = Math.round(clamp(value.screenWidth, 1, 100_000));
   const screenHeight = Math.round(clamp(value.screenHeight, 1, 100_000));
+  const sourceId = sanitizeString(value.sourceId, 256);
   return {
+    ...(sourceId ? { sourceId } : {}),
     x: Math.round(clamp(value.x, 0, screenWidth)),
     y: Math.round(clamp(value.y, 0, screenHeight)),
     screenWidth,

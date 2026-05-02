@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.10 - 2026-05-02
+
+- Fix monitor-aware pointer control, full keyboard capture, fullscreen double-click handling, default take control, and elevated host control.
+
+
 ## v0.2.9 - 2026-04-27
 
 - Add browser-based viewer served by the host app. Add HTTP discovery endpoint and LAN fallback probing.

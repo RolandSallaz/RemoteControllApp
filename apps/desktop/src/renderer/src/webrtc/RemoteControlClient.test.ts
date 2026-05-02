@@ -38,6 +38,16 @@ test("session lifecycle reducer tracks join recovery and reset phases", () => {
 });
 
 test("host state validation rejects duplicates and unknown active source", () => {
+  assert.deepEqual(sanitizeHostStateMessage({
+    kind: "host-state",
+    activeSourceId: "screen:2",
+    sources: [{ id: "screen:2", name: "Secondary", displayId: "42" }]
+  }), {
+    kind: "host-state",
+    activeSourceId: "screen:2",
+    sources: [{ id: "screen:2", name: "Secondary", displayId: "42" }]
+  });
+
   assert.equal(sanitizeHostStateMessage({
     kind: "host-state",
     sources: [

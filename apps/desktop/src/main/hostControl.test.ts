@@ -58,8 +58,17 @@ function createNutDouble() {
       },
       Key: {
         A: "A",
-        ENTER: "ENTER",
-        Enter: "Enter"
+        Enter: "Enter",
+        LeftAlt: "LeftAlt",
+        LeftControl: "LeftControl",
+        LeftShift: "LeftShift",
+        LeftWin: "LeftWin",
+        Num1: "Num1",
+        Return: "Return",
+        RightAlt: "RightAlt",
+        RightControl: "RightControl",
+        RightShift: "RightShift",
+        RightWin: "RightWin"
       },
       Point,
       straightTo: (point: unknown) => ({ point })
@@ -132,9 +141,23 @@ test("keyboard control types text and maps keys from code and key name", async (
   assert.deepEqual(calls, [
     "type:hello",
     "press:A",
-    "release:Enter"
+    "release:Return"
   ]);
   assert.equal(mapKeyboardKey(nut, "a", "KeyA"), "A");
+});
+
+test("keyboard control maps browser modifier and system key codes", () => {
+  const { nut } = createNutDouble();
+
+  assert.equal(mapKeyboardKey(nut, "Control", "ControlLeft"), "LeftControl");
+  assert.equal(mapKeyboardKey(nut, "Control", "ControlRight"), "RightControl");
+  assert.equal(mapKeyboardKey(nut, "Alt", "AltLeft"), "LeftAlt");
+  assert.equal(mapKeyboardKey(nut, "Alt", "AltRight"), "RightAlt");
+  assert.equal(mapKeyboardKey(nut, "Shift", "ShiftLeft"), "LeftShift");
+  assert.equal(mapKeyboardKey(nut, "Shift", "ShiftRight"), "RightShift");
+  assert.equal(mapKeyboardKey(nut, "Meta", "MetaLeft"), "LeftWin");
+  assert.equal(mapKeyboardKey(nut, "Meta", "MetaRight"), "RightWin");
+  assert.equal(mapKeyboardKey(nut, "1", "Digit1"), "Num1");
 });
 
 test("loadFirstAvailableNutModule falls back across candidates and surfaces all errors", async () => {

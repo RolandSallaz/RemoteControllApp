@@ -110,6 +110,7 @@ function RemoteControlApp(): ReactElement {
   const [connectInFullscreen, setConnectInFullscreen] = useState(true);
   const [captureLocalInput, setCaptureLocalInput] = useState(false);
   const [disconnectShortcut, setDisconnectShortcut] = useState("Ctrl+Alt+Shift+D");
+  const [takeControl, setTakeControl] = useState(true);
   const [viewerFrameRate, setViewerFrameRate] = useState<FrameRate>(30);
   const [receiveStreamAudio, setReceiveStreamAudio] = useState(true);
   const [switchMonitorShortcut, setSwitchMonitorShortcut] = useState("Ctrl+Alt+Shift+M");
@@ -372,9 +373,7 @@ function RemoteControlApp(): ReactElement {
         if (result.recentServers) {
           setRecentServers(result.recentServers);
         }
-        if (captureLocalInput) {
-          webRtc.setControlEnabled(true);
-        }
+        webRtc.setControlEnabled(takeControl || captureLocalInput);
         if (connectInFullscreen) {
           await enterFullscreen();
         }
@@ -502,10 +501,9 @@ function RemoteControlApp(): ReactElement {
       setDisconnectShortcut(settings.disconnectShortcut);
       setViewerFrameRate(settings.frameRate);
       setReceiveStreamAudio(settings.receiveAudio);
+      setTakeControl(settings.takeControl);
       setSwitchMonitorShortcut(settings.switchMonitorShortcut);
-      if (settings.captureLocalInput) {
-        webRtc.setControlEnabled(true);
-      }
+      webRtc.setControlEnabled(settings.takeControl || settings.captureLocalInput);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -620,7 +618,13 @@ function RemoteControlApp(): ReactElement {
 
   function changeCaptureLocalInput(enabled: boolean): void {
     setCaptureLocalInput(enabled);
-    saveViewerSettings({ captureLocalInput: enabled });
+    if (enabled) {
+      setTakeControl(true);
+    }
+    saveViewerSettings({
+      captureLocalInput: enabled,
+      ...(enabled ? { takeControl: true } : {})
+    });
     if (enabled) {
       webRtc.setControlEnabled(true);
       setIsViewerSettingsOpen(false);
@@ -628,6 +632,8 @@ function RemoteControlApp(): ReactElement {
   }
 
   function changeControlEnabled(enabled: boolean): void {
+    setTakeControl(enabled);
+    saveViewerSettings({ takeControl: enabled });
     webRtc.setControlEnabled(enabled);
     if (!enabled && captureLocalInput) {
       changeCaptureLocalInput(false);

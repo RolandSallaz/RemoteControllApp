@@ -146,6 +146,7 @@ export function VideoStage({
       ) : isConnected ? (
         <>
           <RemoteVideo
+            activeSourceId={activeRemoteSourceId}
             videoRef={remoteVideoRef}
             controlEnabled={controlEnabled}
             disconnectShortcut={disconnectShortcut}
@@ -156,7 +157,6 @@ export function VideoStage({
             onDisconnectShortcut={onDisconnect}
             onInputCaptureChange={onInputCaptureChange}
             onSwitchMonitorShortcut={onSwitchToNextRemoteSource}
-            onToggleFullscreen={onToggleFullscreen}
           />
           {captureLocalInput && controlEnabled && (
             <div className="input-capture-hint">

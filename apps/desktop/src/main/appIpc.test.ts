@@ -16,7 +16,8 @@ test("registerAppIpcHandlers handles host state and viewer preferences", async (
       disconnectShortcut: "D",
       frameRate: 30 as const,
       receiveAudio: true,
-      switchMonitorShortcut: "M"
+      switchMonitorShortcut: "M",
+      takeControl: false
     }
   };
 
@@ -47,6 +48,7 @@ test("registerAppIpcHandlers handles host state and viewer preferences", async (
       frameRate: 30,
       receiveAudio: true,
       switchMonitorShortcut: "M",
+      takeControl: false,
       ...settings.viewer
     }),
     sanitizeViewerSettingsPayload: () => ({ receiveAudio: false }),
@@ -81,7 +83,8 @@ test("registerAppIpcHandlers handles host state and viewer preferences", async (
     disconnectShortcut: "D",
     frameRate: 30,
     receiveAudio: false,
-    switchMonitorShortcut: "M"
+    switchMonitorShortcut: "M",
+    takeControl: false
   });
   assert.deepEqual(await handlers.get("history:add-server")?.({}, "http://new"), {
     ok: true,
@@ -116,7 +119,8 @@ test("registerAppIpcHandlers falls back to local launch setting while backend is
       disconnectShortcut: "D",
       frameRate: 30,
       receiveAudio: true,
-      switchMonitorShortcut: "M"
+      switchMonitorShortcut: "M",
+      takeControl: true
     }),
     sanitizeViewerSettingsPayload: () => ({}),
     sanitizeServerUrl: () => undefined,

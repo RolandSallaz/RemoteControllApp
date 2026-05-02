@@ -19,6 +19,7 @@ export type ViewerSettings = {
   frameRate: ViewerFrameRate;
   receiveAudio: boolean;
   switchMonitorShortcut: string;
+  takeControl: boolean;
 };
 
 type AppIpcDependencies = {

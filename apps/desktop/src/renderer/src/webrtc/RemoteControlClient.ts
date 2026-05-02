@@ -871,6 +871,7 @@ export class RemoteControlClient {
       kind: "host-state",
       activeSourceId: this.currentCaptureSourceId,
       sources: sources.map((source) => ({
+        ...(source.displayId ? { displayId: source.displayId } : {}),
         id: source.id,
         name: source.name
       }))
@@ -1979,6 +1980,10 @@ export function sanitizeHostStateMessage(value: Record<string, unknown>): DataCh
 
     sourceIds.add(id);
     sources.push({ id, name });
+    const displayId = sanitizeString(source.displayId, 64);
+    if (displayId) {
+      sources[sources.length - 1].displayId = displayId;
+    }
   }
 
   const activeSourceId = sanitizeString(value.activeSourceId, 256);
@@ -2105,6 +2110,7 @@ export function sanitizeFileTransferAbortMessage(value: Record<string, unknown>)
 }
 
 function sanitizePointerCoordinates(value: Record<string, unknown>): {
+  sourceId?: string;
   x: number;
   y: number;
   screenWidth: number;
@@ -2123,7 +2129,9 @@ function sanitizePointerCoordinates(value: Record<string, unknown>): {
 
   const screenWidth = Math.round(clamp(value.screenWidth, 1, 100_000));
   const screenHeight = Math.round(clamp(value.screenHeight, 1, 100_000));
+  const sourceId = sanitizeString(value.sourceId, 256);
   return {
+    ...(sourceId ? { sourceId } : {}),
     x: Math.round(clamp(value.x, 0, screenWidth)),
     y: Math.round(clamp(value.y, 0, screenHeight)),
     screenWidth,

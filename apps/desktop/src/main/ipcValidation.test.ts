@@ -22,6 +22,7 @@ test("sanitizeControlMessage accepts bounded pointer and keyboard events", () =>
       kind: "pointer",
       event: {
         type: "move",
+        sourceId: "screen:2",
         x: 10.4,
         y: 20.6,
         screenWidth: 1920,
@@ -32,6 +33,7 @@ test("sanitizeControlMessage accepts bounded pointer and keyboard events", () =>
       kind: "pointer",
       event: {
         type: "move",
+        sourceId: "screen:2",
         x: 10,
         y: 21,
         screenWidth: 1920,
@@ -143,12 +145,14 @@ test("settings validators reject unsafe IPC payloads", () => {
       frameRate: 120,
       receiveAudio: false,
       switchMonitorShortcut: "Ctrl+Alt+Shift+M",
+      takeControl: true,
       disconnectShortcut: "x".repeat(65)
     }),
     {
       captureLocalInput: true,
       receiveAudio: false,
-      switchMonitorShortcut: "Ctrl+Alt+Shift+M"
+      switchMonitorShortcut: "Ctrl+Alt+Shift+M",
+      takeControl: true
     }
   );
 });

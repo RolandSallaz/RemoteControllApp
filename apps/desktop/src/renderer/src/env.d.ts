@@ -1,6 +1,7 @@
 import type { ControlMessage, DiscoveredServer } from "@remote-control/shared";
 
 export type DesktopCaptureSource = {
+  displayId?: string;
   id: string;
   name: string;
   thumbnail: string;
@@ -22,6 +23,7 @@ export type ViewerSettings = {
   frameRate: 15 | 30 | 60;
   receiveAudio: boolean;
   switchMonitorShortcut: string;
+  takeControl: boolean;
 };
 
 export type ClipboardData = {

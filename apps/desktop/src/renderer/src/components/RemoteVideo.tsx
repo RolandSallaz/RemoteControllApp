@@ -4,6 +4,7 @@ import type { ControlMessage } from "@remote-control/shared";
 import { isInputCaptureExitShortcut, isKeyboardShortcut } from "../hotkeys";
 
 export function RemoteVideo({
+  activeSourceId,
   videoRef,
   controlEnabled,
   disconnectShortcut,
@@ -13,9 +14,9 @@ export function RemoteVideo({
   onControl,
   onDisconnectShortcut,
   onInputCaptureChange,
-  onSwitchMonitorShortcut,
-  onToggleFullscreen
+  onSwitchMonitorShortcut
 }: {
+  activeSourceId?: string;
   videoRef: RefObject<HTMLVideoElement | null>;
   controlEnabled: boolean;
   disconnectShortcut: string;
@@ -26,14 +27,19 @@ export function RemoteVideo({
   onDisconnectShortcut: () => void;
   onInputCaptureChange: (enabled: boolean) => void;
   onSwitchMonitorShortcut: () => void;
-  onToggleFullscreen: () => void;
 }): ReactElement {
+  const activeSourceIdRef = useRef<string | undefined>(activeSourceId);
+  const pressedKeysRef = useRef(new Map<string, { code: string; key: string }>());
   const virtualPointerRef = useRef({
     x: 0,
     y: 0,
     screenWidth: 0,
     screenHeight: 0
   });
+
+  useEffect(() => {
+    activeSourceIdRef.current = activeSourceId;
+  }, [activeSourceId]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -47,18 +53,31 @@ export function RemoteVideo({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!controlEnabled || !inputCaptureEnabled || !video) {
+    if (!inputCaptureEnabled || !video) {
       return;
     }
 
-    const screenWidth = video.videoWidth || Math.round(video.getBoundingClientRect().width);
-    const screenHeight = video.videoHeight || Math.round(video.getBoundingClientRect().height);
-    virtualPointerRef.current = {
-      x: Math.round(screenWidth / 2),
-      y: Math.round(screenHeight / 2),
-      screenWidth,
-      screenHeight
+    const resetVirtualPointer = (): void => {
+      const screenWidth = video.videoWidth || Math.round(video.getBoundingClientRect().width);
+      const screenHeight = video.videoHeight || Math.round(video.getBoundingClientRect().height);
+      virtualPointerRef.current = {
+        x: Math.round(screenWidth / 2),
+        y: Math.round(screenHeight / 2),
+        screenWidth,
+        screenHeight
+      };
     };
+
+    resetVirtualPointer();
+    video.addEventListener("loadedmetadata", resetVirtualPointer);
+    return () => video.removeEventListener("loadedmetadata", resetVirtualPointer);
+  }, [activeSourceId, inputCaptureEnabled, videoRef]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!controlEnabled || !inputCaptureEnabled || !video) {
+      return;
+    }
 
     video.focus();
     try {
@@ -69,11 +88,23 @@ export function RemoteVideo({
 
     const keyboard = navigator as Navigator & {
       keyboard?: {
-        lock?: () => Promise<void>;
+        lock?: (keyCodes?: string[]) => Promise<void>;
         unlock?: () => void;
       };
     };
-    void keyboard.keyboard?.lock?.();
+    try {
+      const lockPromise = keyboard.keyboard?.lock?.();
+      void lockPromise?.catch(() => undefined);
+    } catch {
+      // Keyboard lock is best effort; key events still flow through the capture listeners.
+    }
+
+    const releasePressedKeys = (): void => {
+      for (const pressedKey of pressedKeysRef.current.values()) {
+        onControl({ kind: "keyboard", event: { type: "keyUp", ...pressedKey } });
+      }
+      pressedKeysRef.current.clear();
+    };
 
     const handlePointerMove = (event: MouseEvent): void => {
       if (document.pointerLockElement !== video) {
@@ -88,7 +119,7 @@ export function RemoteVideo({
         screenHeight: current.screenHeight
       };
       virtualPointerRef.current = next;
-      onControl({ kind: "pointer", event: { type: "move", ...next } });
+      onControl({ kind: "pointer", event: { type: "move", ...withSourceId(next, activeSourceIdRef.current) } });
     };
 
     const handleWheel = (event: WheelEvent): void => {
@@ -100,20 +131,15 @@ export function RemoteVideo({
       event.preventDefault();
       event.stopPropagation();
       if (isInputCaptureExitShortcut(event)) {
+        releasePressedKeys();
         onInputCaptureChange(false);
-        return;
-      }
-      if (isKeyboardShortcut(event, disconnectShortcut)) {
-        onDisconnectShortcut();
-        return;
-      }
-      if (isKeyboardShortcut(event, switchMonitorShortcut)) {
-        onSwitchMonitorShortcut();
         return;
       }
 
       if (!event.repeat) {
-        onControl({ kind: "keyboard", event: { type: "keyDown", code: event.code, key: event.key } });
+        const pressedKey = { code: event.code, key: event.key };
+        pressedKeysRef.current.set(getKeyIdentity(event), pressedKey);
+        onControl({ kind: "keyboard", event: { type: "keyDown", ...pressedKey } });
       }
     };
 
@@ -124,11 +150,13 @@ export function RemoteVideo({
         return;
       }
 
+      pressedKeysRef.current.delete(getKeyIdentity(event));
       onControl({ kind: "keyboard", event: { type: "keyUp", code: event.code, key: event.key } });
     };
 
     const handlePointerLockChange = (): void => {
       if (document.pointerLockElement !== video) {
+        releasePressedKeys();
         onInputCaptureChange(false);
       }
     };
@@ -145,6 +173,7 @@ export function RemoteVideo({
       window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
+      releasePressedKeys();
       keyboard.keyboard?.unlock?.();
       if (document.pointerLockElement === video) {
         document.exitPointerLock();
@@ -162,12 +191,7 @@ export function RemoteVideo({
     videoRef
   ]);
 
-  function pointerPosition(event: PointerEvent<HTMLVideoElement>): {
-    x: number;
-    y: number;
-    screenWidth: number;
-    screenHeight: number;
-  } {
+  function pointerPosition(event: PointerEvent<HTMLVideoElement>): PointerCoordinates {
     const video = event.currentTarget;
     const rect = video.getBoundingClientRect();
     const screenWidth = video.videoWidth || Math.round(rect.width);
@@ -189,11 +213,10 @@ export function RemoteVideo({
       playsInline
       muted={!receiveAudio}
       tabIndex={controlEnabled ? 0 : -1}
-      onDoubleClick={() => onToggleFullscreen()}
       onContextMenu={(event) => event.preventDefault()}
       onPointerMove={(event) => {
         if (!controlEnabled || inputCaptureEnabled) return;
-        onControl({ kind: "pointer", event: { type: "move", ...pointerPosition(event) } });
+        onControl({ kind: "pointer", event: { type: "move", ...withSourceId(pointerPosition(event), activeSourceId) } });
       }}
       onPointerDown={(event) => {
         if (!controlEnabled) return;
@@ -209,7 +232,7 @@ export function RemoteVideo({
         const pointer = inputCaptureEnabled ? virtualPointerRef.current : pointerPosition(event);
         onControl({
           kind: "pointer",
-          event: { type: "click", button: mapPointerButton(event.button), ...pointer }
+          event: { type: "click", button: mapPointerButton(event.button), ...withSourceId(pointer, activeSourceId) }
         });
       }}
       onWheel={(event) => {
@@ -237,6 +260,21 @@ export function RemoteVideo({
       }}
     />
   );
+}
+
+type PointerCoordinates = {
+  x: number;
+  y: number;
+  screenWidth: number;
+  screenHeight: number;
+};
+
+function withSourceId(pointer: PointerCoordinates, sourceId?: string): PointerCoordinates & { sourceId?: string } {
+  return sourceId ? { ...pointer, sourceId } : pointer;
+}
+
+function getKeyIdentity(event: KeyboardEvent): string {
+  return `${event.code}\0${event.key}`;
 }
 
 function mapPointerButton(button: number): "left" | "middle" | "right" {

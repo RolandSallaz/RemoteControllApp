@@ -22,6 +22,7 @@ import {
   getTrayStatusText,
   getViewerSettings,
   hashAccessPassword,
+  mapControlMessageToDisplay,
   notifyHostShutdownAndQuit,
   openTrustedExternalUrl,
   readJsonSettings,
@@ -184,7 +185,8 @@ test("settings and backend helpers merge defaults persist JSON and wrap backend 
       disconnectShortcut: "Ctrl+Alt+Shift+D",
       frameRate: 30,
       receiveAudio: true,
-      switchMonitorShortcut: "Ctrl+Alt+Shift+M"
+      switchMonitorShortcut: "Ctrl+Alt+Shift+M",
+      takeControl: true
     });
     assert.equal(getDefaultSaveDirectory("C:/Downloads").replace(/\\/g, "/"), "C:/Downloads/RemoteControl");
     assert.deepEqual(getViewerSettings({
@@ -484,6 +486,7 @@ test("misc main-process helpers handle hashing tray notifications quit flow and 
     },
     desktopCapturer: {
       getSources: async () => [{
+        display_id: "2",
         id: "screen:1",
         name: "Primary",
         thumbnail: {
@@ -498,16 +501,48 @@ test("misc main-process helpers handle hashing tray notifications quit flow and 
         handlers.set(channel, listener);
       }
     },
+    screen: {
+      getAllDisplays: () => [{
+        id: 2,
+        bounds: {
+          x: 1920,
+          y: 0,
+          width: 2560,
+          height: 1440
+        }
+      }]
+    },
     sanitizeControlMessage: (message) => message as never
   });
 
   assert.deepEqual(await handlers.get("desktop:get-sources")?.(), [{
+    displayId: "2",
     id: "screen:1",
     name: "Primary",
     thumbnail: "data:image/png;base64,AAAA"
   }]);
-  assert.deepEqual(await handlers.get("control:message")?.({}, { kind: "pointer" }), { ok: true });
-  assert.deepEqual(appliedControl, { kind: "pointer" });
+  assert.deepEqual(await handlers.get("control:message")?.({}, {
+    kind: "pointer",
+    event: {
+      type: "move",
+      sourceId: "screen:1",
+      x: 1280,
+      y: 720,
+      screenWidth: 2560,
+      screenHeight: 1440
+    }
+  }), { ok: true });
+  assert.deepEqual(appliedControl, {
+    kind: "pointer",
+    event: {
+      type: "move",
+      sourceId: "screen:1",
+      x: 3200,
+      y: 720,
+      screenWidth: 2560,
+      screenHeight: 1440
+    }
+  });
   assert.deepEqual(await handlers.get("backend:status")?.(), { status: "running", url: "http://localhost:47315" });
   assert.deepEqual(await handlers.get("discovery:scan")?.(), [{
     id: "srv-1",
@@ -517,4 +552,48 @@ test("misc main-process helpers handle hashing tray notifications quit flow and 
     url: "http://192.0.2.10:47315",
     lastSeen: 1
   }]);
+});
+
+test("mapControlMessageToDisplay maps pointer coordinates onto the selected monitor bounds", () => {
+  const sourcesById = new Map([["screen:2", {
+    displayId: "42",
+    id: "screen:2",
+    name: "Secondary",
+    thumbnail: ""
+  }]]);
+
+  assert.deepEqual(mapControlMessageToDisplay({
+    kind: "pointer",
+    event: {
+      type: "click",
+      button: "left",
+      sourceId: "screen:2",
+      x: 960,
+      y: 540,
+      screenWidth: 1920,
+      screenHeight: 1080
+    }
+  }, {
+    sourcesById,
+    displays: [{
+      id: 42,
+      bounds: {
+        x: -1280,
+        y: 200,
+        width: 1280,
+        height: 720
+      }
+    }]
+  }), {
+    kind: "pointer",
+    event: {
+      type: "click",
+      button: "left",
+      sourceId: "screen:2",
+      x: -640,
+      y: 560,
+      screenWidth: 1280,
+      screenHeight: 720
+    }
+  });
 });
