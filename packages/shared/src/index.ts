@@ -212,6 +212,15 @@ export type ControlPointerEvent =
       screenHeight: number;
     }
   | {
+      type: "mouseDown" | "mouseUp";
+      button: "left" | "middle" | "right";
+      sourceId?: string;
+      x: number;
+      y: number;
+      screenWidth: number;
+      screenHeight: number;
+    }
+  | {
       type: "scroll";
       deltaX: number;
       deltaY: number;

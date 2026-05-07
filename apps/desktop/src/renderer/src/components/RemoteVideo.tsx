@@ -30,6 +30,7 @@ export function RemoteVideo({
 }): ReactElement {
   const activeSourceIdRef = useRef<string | undefined>(activeSourceId);
   const pressedKeysRef = useRef(new Map<string, { code: string; key: string }>());
+  const pressedButtonsRef = useRef(new Set<"left" | "middle" | "right">());
   const virtualPointerRef = useRef({
     x: 0,
     y: 0,
@@ -80,11 +81,32 @@ export function RemoteVideo({
     }
 
     video.focus();
-    try {
-      video.requestPointerLock();
-    } catch {
-      // Pointer lock can require a user gesture in some environments.
-    }
+    const requestLock = (): void => {
+      if (document.pointerLockElement === video) {
+        return;
+      }
+      try {
+        const lockResult = (video as HTMLVideoElement & {
+          requestPointerLock: (options?: { unadjustedMovement?: boolean }) => Promise<void> | void;
+        }).requestPointerLock({ unadjustedMovement: true });
+        if (lockResult && typeof (lockResult as Promise<void>).catch === "function") {
+          (lockResult as Promise<void>).catch(() => {
+            try {
+              video.requestPointerLock();
+            } catch {
+              // Pointer lock can require a user gesture in some environments.
+            }
+          });
+        }
+      } catch {
+        try {
+          video.requestPointerLock();
+        } catch {
+          // Pointer lock can require a user gesture in some environments.
+        }
+      }
+    };
+    requestLock();
 
     const keyboard = navigator as Navigator & {
       keyboard?: {
@@ -106,6 +128,20 @@ export function RemoteVideo({
       pressedKeysRef.current.clear();
     };
 
+    const releasePressedButtons = (): void => {
+      for (const button of pressedButtonsRef.current) {
+        onControl({
+          kind: "pointer",
+          event: {
+            type: "mouseUp",
+            button,
+            ...withSourceId(virtualPointerRef.current, activeSourceIdRef.current)
+          }
+        });
+      }
+      pressedButtonsRef.current.clear();
+    };
+
     const handlePointerMove = (event: MouseEvent): void => {
       if (document.pointerLockElement !== video) {
         return;
@@ -125,6 +161,45 @@ export function RemoteVideo({
     const handleWheel = (event: WheelEvent): void => {
       event.preventDefault();
       onControl({ kind: "pointer", event: { type: "scroll", deltaX: event.deltaX, deltaY: event.deltaY } });
+    };
+
+    const handleMouseDown = (event: MouseEvent): void => {
+      if (document.pointerLockElement !== video) {
+        requestLock();
+        return;
+      }
+      event.preventDefault();
+      const button = mapPointerButton(event.button);
+      pressedButtonsRef.current.add(button);
+      onControl({
+        kind: "pointer",
+        event: {
+          type: "mouseDown",
+          button,
+          ...withSourceId(virtualPointerRef.current, activeSourceIdRef.current)
+        }
+      });
+    };
+
+    const handleMouseUp = (event: MouseEvent): void => {
+      if (document.pointerLockElement !== video) {
+        return;
+      }
+      event.preventDefault();
+      const button = mapPointerButton(event.button);
+      pressedButtonsRef.current.delete(button);
+      onControl({
+        kind: "pointer",
+        event: {
+          type: "mouseUp",
+          button,
+          ...withSourceId(virtualPointerRef.current, activeSourceIdRef.current)
+        }
+      });
+    };
+
+    const handleContextMenu = (event: Event): void => {
+      event.preventDefault();
     };
 
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -157,11 +232,15 @@ export function RemoteVideo({
     const handlePointerLockChange = (): void => {
       if (document.pointerLockElement !== video) {
         releasePressedKeys();
+        releasePressedButtons();
         onInputCaptureChange(false);
       }
     };
 
     document.addEventListener("mousemove", handlePointerMove);
+    document.addEventListener("mousedown", handleMouseDown, true);
+    document.addEventListener("mouseup", handleMouseUp, true);
+    document.addEventListener("contextmenu", handleContextMenu, true);
     document.addEventListener("pointerlockchange", handlePointerLockChange);
     window.addEventListener("wheel", handleWheel, { passive: false });
     window.addEventListener("keydown", handleKeyDown, true);
@@ -169,11 +248,15 @@ export function RemoteVideo({
 
     return () => {
       document.removeEventListener("mousemove", handlePointerMove);
+      document.removeEventListener("mousedown", handleMouseDown, true);
+      document.removeEventListener("mouseup", handleMouseUp, true);
+      document.removeEventListener("contextmenu", handleContextMenu, true);
       document.removeEventListener("pointerlockchange", handlePointerLockChange);
       window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
       releasePressedKeys();
+      releasePressedButtons();
       keyboard.keyboard?.unlock?.();
       if (document.pointerLockElement === video) {
         document.exitPointerLock();
@@ -221,18 +304,45 @@ export function RemoteVideo({
       onPointerDown={(event) => {
         if (!controlEnabled) return;
         event.currentTarget.focus();
-        if (inputCaptureEnabled && document.pointerLockElement !== event.currentTarget) {
-          try {
-            event.currentTarget.requestPointerLock();
-          } catch {
-            // Pointer lock can require a user gesture in some environments.
+        if (inputCaptureEnabled) {
+          if (document.pointerLockElement !== event.currentTarget) {
+            try {
+              const lockResult = (event.currentTarget as HTMLVideoElement & {
+                requestPointerLock: (options?: { unadjustedMovement?: boolean }) => Promise<void> | void;
+              }).requestPointerLock({ unadjustedMovement: true });
+              if (lockResult && typeof (lockResult as Promise<void>).catch === "function") {
+                (lockResult as Promise<void>).catch(() => undefined);
+              }
+            } catch {
+              // Pointer lock can require a user gesture in some environments.
+            }
           }
+          return;
         }
         event.currentTarget.setPointerCapture(event.pointerId);
-        const pointer = inputCaptureEnabled ? virtualPointerRef.current : pointerPosition(event);
+        const button = mapPointerButton(event.button);
+        pressedButtonsRef.current.add(button);
         onControl({
           kind: "pointer",
-          event: { type: "click", button: mapPointerButton(event.button), ...withSourceId(pointer, activeSourceId) }
+          event: { type: "mouseDown", button, ...withSourceId(pointerPosition(event), activeSourceId) }
+        });
+      }}
+      onPointerUp={(event) => {
+        if (!controlEnabled || inputCaptureEnabled) return;
+        const button = mapPointerButton(event.button);
+        if (!pressedButtonsRef.current.delete(button)) return;
+        onControl({
+          kind: "pointer",
+          event: { type: "mouseUp", button, ...withSourceId(pointerPosition(event), activeSourceId) }
+        });
+      }}
+      onPointerCancel={(event) => {
+        if (!controlEnabled || inputCaptureEnabled) return;
+        const button = mapPointerButton(event.button);
+        if (!pressedButtonsRef.current.delete(button)) return;
+        onControl({
+          kind: "pointer",
+          event: { type: "mouseUp", button, ...withSourceId(pointerPosition(event), activeSourceId) }
         });
       }}
       onWheel={(event) => {

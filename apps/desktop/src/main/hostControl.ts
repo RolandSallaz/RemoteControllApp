@@ -4,6 +4,8 @@ type NutModule = {
   mouse: {
     move: (path: unknown) => Promise<void>;
     click: (button: unknown) => Promise<void>;
+    pressButton?: (button: unknown) => Promise<void>;
+    releaseButton?: (button: unknown) => Promise<void>;
     scrollDown?: (amount: number) => Promise<void>;
     scrollUp?: (amount: number) => Promise<void>;
     scrollLeft?: (amount: number) => Promise<void>;
@@ -53,19 +55,40 @@ export async function applyPointerEvent(nut: NutModule, event: ControlPointerEve
     return;
   }
 
-  const verticalAmount = Math.round(Math.abs(event.deltaY));
-  const horizontalAmount = Math.round(Math.abs(event.deltaX));
-
-  if (event.deltaY > 0 && nut.mouse.scrollDown) {
-    await nut.mouse.scrollDown(verticalAmount);
-  } else if (event.deltaY < 0 && nut.mouse.scrollUp) {
-    await nut.mouse.scrollUp(verticalAmount);
+  if (event.type === "mouseDown") {
+    await movePointer(nut, event.x, event.y);
+    const button = mapMouseButton(nut, event.button);
+    if (nut.mouse.pressButton) {
+      await nut.mouse.pressButton(button);
+    } else {
+      await nut.mouse.click(button);
+    }
+    return;
   }
 
-  if (event.deltaX > 0 && nut.mouse.scrollRight) {
-    await nut.mouse.scrollRight(horizontalAmount);
-  } else if (event.deltaX < 0 && nut.mouse.scrollLeft) {
-    await nut.mouse.scrollLeft(horizontalAmount);
+  if (event.type === "mouseUp") {
+    await movePointer(nut, event.x, event.y);
+    if (nut.mouse.releaseButton) {
+      await nut.mouse.releaseButton(mapMouseButton(nut, event.button));
+    }
+    return;
+  }
+
+  if (event.type === "scroll") {
+    const verticalAmount = Math.round(Math.abs(event.deltaY));
+    const horizontalAmount = Math.round(Math.abs(event.deltaX));
+
+    if (event.deltaY > 0 && nut.mouse.scrollDown) {
+      await nut.mouse.scrollDown(verticalAmount);
+    } else if (event.deltaY < 0 && nut.mouse.scrollUp) {
+      await nut.mouse.scrollUp(verticalAmount);
+    }
+
+    if (event.deltaX > 0 && nut.mouse.scrollRight) {
+      await nut.mouse.scrollRight(horizontalAmount);
+    } else if (event.deltaX < 0 && nut.mouse.scrollLeft) {
+      await nut.mouse.scrollLeft(horizontalAmount);
+    }
   }
 }
 

@@ -203,14 +203,14 @@ function sanitizePointerMessage(value: Record<string, unknown>): ControlMessage 
     return pointer ? { kind: "pointer", event: { type: "move", ...pointer } } : undefined;
   }
 
-  if (value.event.type === "click") {
+  if (value.event.type === "click" || value.event.type === "mouseDown" || value.event.type === "mouseUp") {
     const pointer = sanitizePointerCoordinates(value.event);
     const button = value.event.button;
     if (!pointer || (button !== "left" && button !== "middle" && button !== "right")) {
       return undefined;
     }
 
-    return { kind: "pointer", event: { type: "click", button, ...pointer } };
+    return { kind: "pointer", event: { type: value.event.type, button, ...pointer } };
   }
 
   if (value.event.type === "scroll" && isFiniteNumber(value.event.deltaX) && isFiniteNumber(value.event.deltaY)) {
