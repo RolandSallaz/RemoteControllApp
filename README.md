@@ -46,8 +46,6 @@ cp .env.example .env
 docker compose --env-file .env up -d
 ```
 
-See `infra/coturn/README.md` for required ports and server environment variables.
-
 ## Development
 
 Requirements:
