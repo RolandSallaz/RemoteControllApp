@@ -97,4 +97,4 @@ apps/desktop   Electron app
 apps/server    NestJS signaling server
 packages/shared shared protocol types
 infra/coturn   optional TURN server
-```
+
