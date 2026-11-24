@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.13 - 2026-11-24
+
+- Forward printable characters across keyboard layouts and keep mouse clicks working without pointer lock.
+
+
 ## v0.2.12 - 2026-11-24
 
 - Fix keyboard capture across viewer updates and restore Escape forwarding on the host.
