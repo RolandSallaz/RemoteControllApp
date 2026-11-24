@@ -307,7 +307,7 @@ function RemoteControlApp(): ReactElement {
   }, [appMode, isConnected, isFullscreen, isHotkeysOpen, isViewerSettingsOpen]);
 
   useEffect(() => {
-    if (appMode === "host" || role !== "viewer" || !isConnected) {
+    if (appMode === "host" || role !== "viewer" || !isConnected || (captureLocalInput && controlEnabled)) {
       return;
     }
 
@@ -332,7 +332,7 @@ function RemoteControlApp(): ReactElement {
 
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [activeRemoteSourceId, appMode, disconnectShortcut, hostSources, isConnected, role, switchMonitorShortcut]);
+  }, [activeRemoteSourceId, appMode, captureLocalInput, controlEnabled, disconnectShortcut, hostSources, isConnected, role, switchMonitorShortcut]);
 
   async function refreshSources(): Promise<void> {
     try {
@@ -399,11 +399,9 @@ function RemoteControlApp(): ReactElement {
   }
 
   function sendControl(message: ControlMessage): void {
-    if (role !== "viewer" || !controlEnabled) {
-      return;
+    if (role === "viewer") {
+      webRtc.sendControlMessage(message);
     }
-
-    webRtc.sendControlMessage(message);
   }
 
   function switchRemoteSource(sourceId: string): void {

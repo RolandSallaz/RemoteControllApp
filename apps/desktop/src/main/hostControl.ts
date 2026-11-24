@@ -99,7 +99,7 @@ export async function applyKeyboardEvent(nut: NutModule, event: ControlKeyboardE
   }
 
   const key = mapKeyboardKey(nut, event.key, event.code);
-  if (!key) {
+  if (key === undefined) {
     return;
   }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.12 - 2026-11-24
+
+- Fix keyboard capture across viewer updates and restore Escape forwarding on the host.
+
+
 ## v0.2.10 - 2026-05-02
 
 - Fix monitor-aware pointer control, full keyboard capture, fullscreen double-click handling, default take control, and elevated host control.

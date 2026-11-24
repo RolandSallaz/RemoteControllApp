@@ -57,6 +57,7 @@ function createNutDouble() {
         RIGHT: "RIGHT"
       },
       Key: {
+        Escape: 0,
         A: "A",
         Enter: "Enter",
         LeftAlt: "LeftAlt",
@@ -138,10 +139,15 @@ test("keyboard control types text and maps keys from code and key name", async (
     }
   });
 
+  await applyKeyboardEvent(nut, { type: "keyDown", code: "Escape", key: "Escape" });
+  await applyKeyboardEvent(nut, { type: "keyUp", code: "Escape", key: "Escape" });
+
   assert.deepEqual(calls, [
     "type:hello",
     "press:A",
-    "release:Return"
+    "release:Return",
+    "press:0",
+    "release:0"
   ]);
   assert.equal(mapKeyboardKey(nut, "a", "KeyA"), "A");
 });
