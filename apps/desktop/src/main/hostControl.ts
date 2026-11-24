@@ -30,6 +30,19 @@ const nutModuleCandidates = ["@nut-tree/nut-js", "@nut-tree-fork/nut-js"] as con
 let nutPromise: Promise<NutModule> | undefined;
 
 export async function applyHostControl(message: ControlMessage): Promise<void> {
+  if (process.platform === "win32" && message.kind === "keyboard" && message.event.type === "typeText") {
+    const { typeWindowsText } = await import("./windowsTextInput.js");
+    typeWindowsText(message.event.text);
+    return;
+  }
+
+  if (process.platform === "win32" && message.kind === "keyboard" &&
+      message.event.type !== "typeText" && /^Key[A-Z]$/.test(message.event.code)) {
+    const { sendWindowsLetter } = await import("./windowsTextInput.js");
+    sendWindowsLetter(message.event.code.charCodeAt(3), message.event.type === "keyUp");
+    return;
+  }
+
   const nut = await loadNut();
   await applyHostControlWithNut(nut, message);
 }

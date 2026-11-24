@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.14 - 2026-11-24
+
+- Use native Windows Unicode input for text and virtual keys for letter shortcuts across layouts.
+
+
 ## v0.2.13 - 2026-11-24
 
 - Forward printable characters across keyboard layouts and keep mouse clicks working without pointer lock.
